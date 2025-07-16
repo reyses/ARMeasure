@@ -1,24 +1,22 @@
 package com.example.armeasure
 
-import android.graphics.Color // Import Android's Color class
+import android.graphics.Color
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
 import com.example.armeasure.databinding.ActivityMainBinding
-import com.example.armeasure.rendering.RenderHelper
 import com.google.ar.core.Anchor
 import com.google.ar.core.HitResult
 import com.google.ar.sceneform.AnchorNode
 import com.google.ar.sceneform.Node
 import com.google.ar.sceneform.math.Vector3
 import com.google.ar.sceneform.rendering.ModelRenderable
-import com.google.ar.sceneform.ux.ArFragment
 import com.google.ar.sceneform.ux.TransformableNode
-import java.util.Locale // Import Locale for String formatting
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
-    private lateinit var arFragment: ArFragment
+    private lateinit var arFragment: CustomArFragment
 
     private val anchors = mutableListOf<Anchor>()
     private var sphereRenderable: ModelRenderable? = null
@@ -29,17 +27,19 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // The 'cast can never succeed' warning is often a linter bug and can be ignored if the app runs.
-        arFragment = supportFragmentManager.findFragmentById(R.id.arFragment) as ArFragment
+        arFragment = supportFragmentManager.findFragmentById(R.id.arFragment) as CustomArFragment
 
-        setupRenderables()
-        setupListeners()
+        // This is the fix: We post the setup to the view's message queue.
+        // This makes it run after the layout is fully created, avoiding the crash.
+        binding.root.post {
+            setupListeners()
+            setupRenderables()
+        }
     }
 
     private fun setupRenderables() {
-        // FIXED: Used a valid color constructor
         val sphereColor = com.google.ar.sceneform.rendering.Color(Color.MAGENTA)
-        RenderHelper.createSphere(this, 0.02f, sphereColor) { renderable ->
+        LineMeasurementModule.createSphere(this, 0.02f, sphereColor) { renderable ->
             sphereRenderable = renderable
         }
     }
@@ -66,18 +66,15 @@ class MainActivity : AppCompatActivity() {
         val anchor = hitResult.createAnchor()
         anchors.add(anchor)
 
-        val anchorNode = AnchorNode(anchor)
-        anchorNode.setParent(arFragment.arSceneView.scene)
-
-        val sphereNode = TransformableNode(arFragment.transformationSystem)
-        sphereNode.renderable = sphereRenderable
-        sphereNode.setParent(anchorNode)
-
-        // FIXED: Used transformationSystem.selectNode() instead of the old selectExtension
-        arFragment.transformationSystem.selectNode(sphereNode)
+        val anchorNode = AnchorNode(anchor).apply { setParent(arFragment.arSceneView.scene) }
+        TransformableNode(arFragment.transformationSystem).apply {
+            renderable = sphereRenderable
+            setParent(anchorNode)
+            arFragment.transformationSystem.selectNode(this)
+        }
 
         if (anchors.size == 2) {
-            val distanceMeters = MeasurementModule.calculateDistance(anchors[0].pose, anchors[1].pose)
+            val distanceMeters = LineMeasurementModule.calculateLineDistance(anchors[0].pose, anchors[1].pose)
             displayDistance(distanceMeters)
             drawFinalLine()
         }
@@ -87,21 +84,20 @@ class MainActivity : AppCompatActivity() {
         val startAnchor = anchors.firstOrNull() ?: return
         val currentCameraPose = arFragment.arSceneView.arFrame?.camera?.pose ?: return
 
-        lineNode?.setParent(null) // Remove previous line
+        lineNode?.setParent(null)
 
         val startPos = startAnchor.pose.translation
         val currentPos = currentCameraPose.translation
         val startVector = Vector3(startPos[0], startPos[1], startPos[2])
         val currentVector = Vector3(currentPos[0], currentPos[1], currentPos[2])
 
-        // FIXED: Works with the new RenderHelper to create and place a line node
         val whiteColor = com.google.ar.sceneform.rendering.Color(Color.WHITE)
-        RenderHelper.createLineNode(this, startVector, currentVector, whiteColor) { node ->
+        LineMeasurementModule.createLineNode(this, startVector, currentVector, whiteColor) { node ->
             node.setParent(arFragment.arSceneView.scene)
             this.lineNode = node
         }
 
-        val distanceMeters = MeasurementModule.calculateDistance(startAnchor.pose, currentCameraPose)
+        val distanceMeters = LineMeasurementModule.calculateLineDistance(startAnchor.pose, currentCameraPose)
         displayDistance(distanceMeters)
     }
 
@@ -111,20 +107,18 @@ class MainActivity : AppCompatActivity() {
         val startVector = Vector3(startPos[0], startPos[1], startPos[2])
         val endVector = Vector3(endPos[0], endPos[1], endPos[2])
 
-        lineNode?.setParent(null) // Clear temporary line
+        lineNode?.setParent(null)
 
-        // FIXED: Works with the new RenderHelper to create the final line
         val magentaColor = com.google.ar.sceneform.rendering.Color(Color.MAGENTA)
-        RenderHelper.createLineNode(this, startVector, endVector, magentaColor) { node ->
+        LineMeasurementModule.createLineNode(this, startVector, endVector, magentaColor) { node ->
             node.setParent(arFragment.arSceneView.scene)
-            this.lineNode = node // Keep reference to remove it on reset
+            this.lineNode = node
         }
     }
 
     private fun displayDistance(meters: Float) {
         val centimeters = meters * 100
         val inches = meters * 39.37f
-        // FIXED: Added Locale.US to prevent formatting warnings
         binding.tvDistance.text = String.format(Locale.US, "%.2f cm / %.2f in", centimeters, inches)
     }
 
@@ -132,18 +126,16 @@ class MainActivity : AppCompatActivity() {
         anchors.forEach { it.detach() }
         anchors.clear()
 
+        lineNode?.setParent(null)
+        lineNode = null
+
         val children = ArrayList(arFragment.arSceneView.scene.children)
         children.forEach { node ->
             if (node is AnchorNode) {
                 node.anchor?.detach()
-            }
-            if (node.renderable != null) {
-                // This removes spheres and lines
                 node.setParent(null)
             }
         }
-
-        lineNode = null
         binding.tvDistance.text = ""
     }
 }
