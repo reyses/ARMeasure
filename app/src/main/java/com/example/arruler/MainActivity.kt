@@ -36,6 +36,7 @@ class MainActivity : AppCompatActivity() {
 
     private var sphereRenderable: ModelRenderable? = null
     private var yellowMaterial: Material? = null
+    private var cylinderRenderable: ModelRenderable? = null
     private var currentDistanceMeters: Float = 0f
 
     private val decimalFormat = DecimalFormat("0.0", DecimalFormatSymbols(Locale.US)).apply {
@@ -78,6 +79,12 @@ class MainActivity : AppCompatActivity() {
         MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(Color.YELLOW))
             .thenAccept { material ->
                 yellowMaterial = material
+                cylinderRenderable = ShapeFactory.makeCylinder(
+                    0.003f,
+                    1.0f,
+                    Vector3(0f, 0.5f, 0f),
+                    material
+                )
             }
     }
 
@@ -172,6 +179,7 @@ class MainActivity : AppCompatActivity() {
         updateDistanceDisplay()
     }
 
+    private fun drawTemporaryLine(start: Vector3, end: Vector3) {
     private fun drawTemporaryLine(start: Vector3, end: Vector3, distance: Float) {
         lineNode?.setParent(null)
 
@@ -189,6 +197,7 @@ class MainActivity : AppCompatActivity() {
             vectorUp
         )
 
+        val renderable = cylinderRenderable ?: return
         val material = yellowMaterial ?: return
         MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(Color.YELLOW))
             .thenAccept { material ->
@@ -201,6 +210,21 @@ class MainActivity : AppCompatActivity() {
                     material
                 )
 
+        if (lineNode == null || lineNode?.renderable != renderable) {
+            lineNode?.setParent(null)
+            lineNode = Node().apply {
+                setParent(arFragment.arSceneView.scene)
+                this.renderable = renderable
+            }
+        }
+
+        lineNode?.apply {
+            if (parent == null) {
+                setParent(arFragment.arSceneView.scene)
+            }
+            worldPosition = start
+            worldRotation = rotationFromAToB
+            localScale = Vector3(1f, difference.length(), 1f)
         val lineRenderable = ShapeFactory.makeCylinder(
             0.003f,
             difference.length(),
