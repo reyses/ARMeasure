@@ -15,7 +15,7 @@ class DistanceFormatter {
         }
 
         val absValue = abs(value)
-        val rounded = (absValue * 10).roundToInt()
+        val rounded = (absValue * 10).roundToLong()
         val integerPart = rounded / 10
         val fractionalPart = rounded % 10
 
