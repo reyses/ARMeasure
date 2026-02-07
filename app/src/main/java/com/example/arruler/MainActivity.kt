@@ -11,6 +11,7 @@ import com.google.ar.core.Plane
 import com.google.ar.sceneform.AnchorNode
 import com.google.ar.sceneform.Node
 import com.google.ar.sceneform.math.Vector3
+import com.google.ar.sceneform.rendering.Material
 import com.google.ar.sceneform.rendering.MaterialFactory
 import com.google.ar.sceneform.rendering.ModelRenderable
 import com.google.ar.sceneform.rendering.ShapeFactory
@@ -197,6 +198,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         val renderable = cylinderRenderable ?: return
+        val material = yellowMaterial ?: return
         MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(Color.YELLOW))
             .thenAccept { material ->
                 val lineRenderable = ShapeFactory.makeCylinder(
@@ -223,6 +225,18 @@ class MainActivity : AppCompatActivity() {
             worldPosition = start
             worldRotation = rotationFromAToB
             localScale = Vector3(1f, difference.length(), 1f)
+        val lineRenderable = ShapeFactory.makeCylinder(
+            0.003f,
+            difference.length(),
+            Vector3(0f, difference.length() / 2, 0f),
+            material
+        )
+
+        lineNode = Node().apply {
+            setParent(arFragment.arSceneView.scene)
+            renderable = lineRenderable
+            worldPosition = start
+            worldRotation = rotationFromAToB
         }
     }
 
