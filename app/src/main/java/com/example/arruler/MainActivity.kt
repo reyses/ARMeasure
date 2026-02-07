@@ -39,6 +39,10 @@ class MainActivity : AppCompatActivity() {
     private val decimalFormat = DecimalFormat("0.0", DecimalFormatSymbols(Locale.US)).apply {
         roundingMode = RoundingMode.HALF_UP
     }
+    private val tempStart = Vector3()
+    private val tempEnd = Vector3()
+    private val tempDiff = Vector3()
+    private val vectorUp = Vector3.up()
 
     private var isMeasuring = false
     private var unit = MeasurementUnit.CM
@@ -148,8 +152,10 @@ class MainActivity : AppCompatActivity() {
 
         currentDistanceMeters = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
 
-        drawTemporaryLine(Vector3(startPos[0], startPos[1], startPos[2]),
-                         Vector3(endPos[0], endPos[1], endPos[2]))
+        tempStart.set(startPos[0], startPos[1], startPos[2])
+        tempEnd.set(endPos[0], endPos[1], endPos[2])
+
+        drawTemporaryLine(tempStart, tempEnd)
 
         updateDistanceDisplay()
     }
@@ -157,19 +163,24 @@ class MainActivity : AppCompatActivity() {
     private fun drawTemporaryLine(start: Vector3, end: Vector3) {
         lineNode?.setParent(null)
 
-        val difference = Vector3.subtract(end, start)
-        val directionFromTopToBottom = difference.normalized()
+        tempDiff.set(end.x - start.x, end.y - start.y, end.z - start.z)
+        val length = tempDiff.length()
+
+        if (length != 0.0f) {
+            tempDiff.set(tempDiff.x / length, tempDiff.y / length, tempDiff.z / length)
+        }
+
         val rotationFromAToB = com.google.ar.sceneform.math.Quaternion.lookRotation(
-            directionFromTopToBottom,
-            Vector3.up()
+            tempDiff,
+            vectorUp
         )
 
         MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(Color.YELLOW))
             .thenAccept { material ->
                 val lineRenderable = ShapeFactory.makeCylinder(
                     0.003f,
-                    difference.length(),
-                    Vector3(0f, difference.length() / 2, 0f),
+                    length,
+                    Vector3(0f, length / 2, 0f),
                     material
                 )
 
