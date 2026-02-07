@@ -31,6 +31,8 @@ class MainActivity : AppCompatActivity() {
     private var lineNode: Node? = null
 
     private var sphereRenderable: ModelRenderable? = null
+    private var yellowMaterial: com.google.ar.sceneform.rendering.Material? = null
+    private var cylinderRenderable: ModelRenderable? = null
     private var currentDistanceMeters: Float = 0f
 
     private var isMeasuring = false
@@ -58,6 +60,17 @@ class MainActivity : AppCompatActivity() {
         MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(Color.RED))
             .thenAccept { material ->
                 sphereRenderable = ShapeFactory.makeSphere(0.015f, Vector3.zero(), material)
+            }
+
+        MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(Color.YELLOW))
+            .thenAccept { material ->
+                yellowMaterial = material
+                cylinderRenderable = ShapeFactory.makeCylinder(
+                    0.003f,
+                    1.0f,
+                    Vector3(0f, 0.5f, 0f),
+                    material
+                )
             }
     }
 
@@ -148,8 +161,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun drawTemporaryLine(start: Vector3, end: Vector3) {
-        lineNode?.setParent(null)
-
         val difference = Vector3.subtract(end, start)
         val directionFromTopToBottom = difference.normalized()
         val rotationFromAToB = com.google.ar.sceneform.math.Quaternion.lookRotation(
@@ -157,22 +168,24 @@ class MainActivity : AppCompatActivity() {
             Vector3.up()
         )
 
-        MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(Color.YELLOW))
-            .thenAccept { material ->
-                val lineRenderable = ShapeFactory.makeCylinder(
-                    0.003f,
-                    difference.length(),
-                    Vector3(0f, difference.length() / 2, 0f),
-                    material
-                )
+        val renderable = cylinderRenderable ?: return
 
-                lineNode = Node().apply {
-                    setParent(arFragment.arSceneView.scene)
-                    renderable = lineRenderable
-                    worldPosition = start
-                    worldRotation = rotationFromAToB
-                }
+        if (lineNode == null || lineNode?.renderable != renderable) {
+            lineNode?.setParent(null)
+            lineNode = Node().apply {
+                setParent(arFragment.arSceneView.scene)
+                this.renderable = renderable
             }
+        }
+
+        lineNode?.apply {
+            if (parent == null) {
+                setParent(arFragment.arSceneView.scene)
+            }
+            worldPosition = start
+            worldRotation = rotationFromAToB
+            localScale = Vector3(1f, difference.length(), 1f)
+        }
     }
 
     private fun drawFinalLine() {
