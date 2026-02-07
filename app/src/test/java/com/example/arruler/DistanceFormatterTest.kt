@@ -1,7 +1,11 @@
 package com.example.arruler
 
+import org.junit.Assert.assertEquals
 import org.junit.Test
-import org.junit.Assert.*
+import java.text.DecimalFormat
+import java.text.DecimalFormatSymbols
+import java.math.RoundingMode
+import java.util.Locale
 
 class DistanceFormatterTest {
     private val formatter = DistanceFormatter()
@@ -40,14 +44,7 @@ class DistanceFormatterTest {
         assertEquals("-1.5 cm", formatter.format(-1.5f, "cm"))
         assertEquals("-0.5 cm", formatter.format(-0.5f, "cm"))
         assertEquals("-0.1 cm", formatter.format(-0.1f, "cm"))
-import org.junit.Assert.assertEquals
-import org.junit.Test
-import java.text.DecimalFormat
-import java.text.DecimalFormatSymbols
-import java.math.RoundingMode
-import java.util.Locale
-
-class DistanceFormatterTest {
+    }
 
     @Test
     fun testFormattingConsistency() {
@@ -70,8 +67,13 @@ class DistanceFormatterTest {
 
         for (value in testValues) {
             for (unit in units) {
-                val expected = String.format(Locale.US, "%.1f %s", value, unit)
-                val actual = "${decimalFormat.format(value)} $unit"
+                // String.format uses HALF_UP by default for most locales, but check explicitly
+                // Actually DecimalFormat with HALF_UP should match our manual implementation
+                // Our manual implementation does round(value * 10) / 10 which is effectively HALF_UP
+
+                // Let's compare against what we expect from DecimalFormat
+                val expected = "${decimalFormat.format(value)} $unit"
+                val actual = formatter.format(value, unit)
                 assertEquals("Mismatch for value $value unit $unit", expected, actual)
             }
         }
