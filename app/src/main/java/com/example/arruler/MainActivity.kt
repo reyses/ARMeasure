@@ -205,7 +205,7 @@ class MainActivity : AppCompatActivity() {
             worldPosition = start
             worldRotation = rotationFromAToB
             // Scale the unit cylinder (height 1.0) to match distance
-            localScale = Vector3(1f, distance, 1f)
+localScale = tempScale.apply { x = 1f; y = distance; z = 1f }
         }
     }
 
