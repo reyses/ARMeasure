@@ -1,6 +1,5 @@
 package com.example.arruler
 
-import kotlin.math.roundToInt
 import kotlin.math.abs
 
 class DistanceFormatter {
@@ -15,7 +14,9 @@ class DistanceFormatter {
         }
 
         val absValue = abs(value)
-        val rounded = (absValue * 10).roundToLong()
+        // Rounding Mode: HALF_UP
+        // Adding 0.5 and casting to long achieves HALF_UP for positive numbers
+        val rounded = (absValue * 10 + 0.5f).toLong()
         val integerPart = rounded / 10
         val fractionalPart = rounded % 10
 

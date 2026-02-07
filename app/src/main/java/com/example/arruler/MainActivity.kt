@@ -2,7 +2,6 @@ package com.example.arruler
 
 import android.graphics.Color
 import android.os.Bundle
-import android.view.View
 import androidx.appcompat.app.AppCompatActivity
 import com.example.arruler.databinding.ActivityMainBinding
 import com.google.ar.core.Anchor
@@ -10,17 +9,14 @@ import com.google.ar.core.HitResult
 import com.google.ar.core.Plane
 import com.google.ar.sceneform.AnchorNode
 import com.google.ar.sceneform.Node
+import com.google.ar.sceneform.math.Quaternion
 import com.google.ar.sceneform.math.Vector3
 import com.google.ar.sceneform.rendering.Material
 import com.google.ar.sceneform.rendering.MaterialFactory
 import com.google.ar.sceneform.rendering.ModelRenderable
 import com.google.ar.sceneform.rendering.ShapeFactory
 import com.google.ar.sceneform.ux.ArFragment
-import java.math.RoundingMode
-import java.text.DecimalFormat
-import java.text.DecimalFormatSymbols
-import java.util.Locale
-import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 class MainActivity : AppCompatActivity() {
 
@@ -39,9 +35,6 @@ class MainActivity : AppCompatActivity() {
     private var cylinderRenderable: ModelRenderable? = null
     private var currentDistanceMeters: Float = 0f
 
-    private val decimalFormat = DecimalFormat("0.0", DecimalFormatSymbols(Locale.US)).apply {
-        roundingMode = RoundingMode.HALF_UP
-    }
     private val tempStart = Vector3()
     private val tempEnd = Vector3()
     private val tempDiff = Vector3()
@@ -63,6 +56,7 @@ class MainActivity : AppCompatActivity() {
 
         arFragment = supportFragmentManager.findFragmentById(R.id.arFragment) as ArFragment
 
+        // Sceneform 1.15+ specific: disable plane renderer by default
         arFragment.arSceneView.planeRenderer.isEnabled = false
 
         setupRenderable()
@@ -79,6 +73,7 @@ class MainActivity : AppCompatActivity() {
         MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(Color.YELLOW))
             .thenAccept { material ->
                 yellowMaterial = material
+                // Create a unit cylinder with height 1.0, centered at Y=0.5
                 cylinderRenderable = ShapeFactory.makeCylinder(
                     0.003f,
                     1.0f,
@@ -162,53 +157,24 @@ class MainActivity : AppCompatActivity() {
         val startPos = startAnchor?.pose?.translation ?: return
         val endPos = hitPose.translation
 
+        // Manual distance calculation to avoid allocations
         val dx = endPos[0] - startPos[0]
         val dy = endPos[1] - startPos[1]
         val dz = endPos[2] - startPos[2]
 
-        currentDistanceMeters = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
+        currentDistanceMeters = sqrt(dx * dx + dy * dy + dz * dz)
 
-        drawTemporaryLine(Vector3(startPos[0], startPos[1], startPos[2]),
-                         Vector3(endPos[0], endPos[1], endPos[2]),
-                         currentDistanceMeters)
+        // Set temp vectors for drawing
         tempStart.set(startPos[0], startPos[1], startPos[2])
         tempEnd.set(endPos[0], endPos[1], endPos[2])
 
-        drawTemporaryLine(tempStart, tempEnd)
+        drawTemporaryLine(tempStart, tempEnd, currentDistanceMeters)
 
         updateDistanceDisplay()
     }
 
-    private fun drawTemporaryLine(start: Vector3, end: Vector3) {
     private fun drawTemporaryLine(start: Vector3, end: Vector3, distance: Float) {
-        lineNode?.setParent(null)
-
-        val difference = Vector3.subtract(end, start)
-        val directionFromTopToBottom = if (distance > 0) difference.scaled(1.0f / distance) else Vector3.zero()
-        tempDiff.set(end.x - start.x, end.y - start.y, end.z - start.z)
-        val length = tempDiff.length()
-
-        if (length != 0.0f) {
-            tempDiff.set(tempDiff.x / length, tempDiff.y / length, tempDiff.z / length)
-        }
-
-        val rotationFromAToB = com.google.ar.sceneform.math.Quaternion.lookRotation(
-            tempDiff,
-            vectorUp
-        )
-
         val renderable = cylinderRenderable ?: return
-        val material = yellowMaterial ?: return
-        MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(Color.YELLOW))
-            .thenAccept { material ->
-                val lineRenderable = ShapeFactory.makeCylinder(
-                    0.003f,
-                    distance,
-                    Vector3(0f, distance / 2, 0f),
-                    length,
-                    Vector3(0f, length / 2, 0f),
-                    material
-                )
 
         if (lineNode == null || lineNode?.renderable != renderable) {
             lineNode?.setParent(null)
@@ -218,25 +184,28 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Calculate rotation
+        // diff = end - start
+        tempDiff.set(end.x - start.x, end.y - start.y, end.z - start.z)
+
+        // Normalize tempDiff in place if length > 0
+        if (distance > 0) {
+            val invDistance = 1.0f / distance
+            tempDiff.set(tempDiff.x * invDistance, tempDiff.y * invDistance, tempDiff.z * invDistance)
+        } else {
+            tempDiff.set(0f, 0f, 0f)
+        }
+
+        val rotationFromAToB = Quaternion.lookRotation(tempDiff, vectorUp)
+
         lineNode?.apply {
             if (parent == null) {
                 setParent(arFragment.arSceneView.scene)
             }
             worldPosition = start
             worldRotation = rotationFromAToB
-            localScale = Vector3(1f, difference.length(), 1f)
-        val lineRenderable = ShapeFactory.makeCylinder(
-            0.003f,
-            difference.length(),
-            Vector3(0f, difference.length() / 2, 0f),
-            material
-        )
-
-        lineNode = Node().apply {
-            setParent(arFragment.arSceneView.scene)
-            renderable = lineRenderable
-            worldPosition = start
-            worldRotation = rotationFromAToB
+            // Scale the unit cylinder (height 1.0) to match distance
+localScale = tempScale.apply { x = 1f; y = distance; z = 1f }
         }
     }
 
@@ -249,7 +218,7 @@ class MainActivity : AppCompatActivity() {
 
         val difference = Vector3.subtract(end, start)
         val directionFromTopToBottom = difference.normalized()
-        val rotationFromAToB = com.google.ar.sceneform.math.Quaternion.lookRotation(
+        val rotationFromAToB = Quaternion.lookRotation(
             directionFromTopToBottom,
             Vector3.up()
         )
@@ -279,6 +248,8 @@ class MainActivity : AppCompatActivity() {
     private fun performHitTest(): HitResult? {
         val frame = arFragment.arSceneView.arFrame ?: return null
         val view = arFragment.view ?: return null
+        // Check if view has size
+        if (view.width == 0 || view.height == 0) return null
 
         val hits = frame.hitTest(view.width / 2f, view.height / 2f)
         return hits.firstOrNull { hitResult ->
@@ -336,7 +307,6 @@ class MainActivity : AppCompatActivity() {
 
         if (currentDistanceMeters > 0) {
             binding.tvDistance.text = distanceFormatter.format(value, unitText)
-            binding.tvDistance.text = "${decimalFormat.format(value)} $unitText"
         } else {
             binding.tvDistance.text = "—"
         }
