@@ -142,16 +142,17 @@ class MainActivity : AppCompatActivity() {
         currentDistanceMeters = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
 
         drawTemporaryLine(Vector3(startPos[0], startPos[1], startPos[2]),
-                         Vector3(endPos[0], endPos[1], endPos[2]))
+                         Vector3(endPos[0], endPos[1], endPos[2]),
+                         currentDistanceMeters)
 
         updateDistanceDisplay()
     }
 
-    private fun drawTemporaryLine(start: Vector3, end: Vector3) {
+    private fun drawTemporaryLine(start: Vector3, end: Vector3, distance: Float) {
         lineNode?.setParent(null)
 
         val difference = Vector3.subtract(end, start)
-        val directionFromTopToBottom = difference.normalized()
+        val directionFromTopToBottom = if (distance > 0) difference.scaled(1.0f / distance) else Vector3.zero()
         val rotationFromAToB = com.google.ar.sceneform.math.Quaternion.lookRotation(
             directionFromTopToBottom,
             Vector3.up()
@@ -161,8 +162,8 @@ class MainActivity : AppCompatActivity() {
             .thenAccept { material ->
                 val lineRenderable = ShapeFactory.makeCylinder(
                     0.003f,
-                    difference.length(),
-                    Vector3(0f, difference.length() / 2, 0f),
+                    distance,
+                    Vector3(0f, distance / 2, 0f),
                     material
                 )
 
