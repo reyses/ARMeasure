@@ -31,7 +31,7 @@ class MainActivity : AppCompatActivity() {
     private var lineNode: Node? = null
 
     private var sphereRenderable: ModelRenderable? = null
-    private var yellowMaterial: com.google.ar.sceneform.rendering.Material? = null
+    private var yellowMaterial: Material? = null
     private var cylinderRenderable: ModelRenderable? = null
     private var currentDistanceMeters: Float = 0f
 
