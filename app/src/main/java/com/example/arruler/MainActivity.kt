@@ -15,6 +15,9 @@ import com.google.ar.sceneform.rendering.MaterialFactory
 import com.google.ar.sceneform.rendering.ModelRenderable
 import com.google.ar.sceneform.rendering.ShapeFactory
 import com.google.ar.sceneform.ux.ArFragment
+import java.math.RoundingMode
+import java.text.DecimalFormat
+import java.text.DecimalFormatSymbols
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -33,6 +36,9 @@ class MainActivity : AppCompatActivity() {
     private var sphereRenderable: ModelRenderable? = null
     private var currentDistanceMeters: Float = 0f
 
+    private val decimalFormat = DecimalFormat("0.0", DecimalFormatSymbols(Locale.US)).apply {
+        roundingMode = RoundingMode.HALF_UP
+    }
     private val tempStart = Vector3()
     private val tempEnd = Vector3()
     private val tempDiff = Vector3()
@@ -282,7 +288,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (currentDistanceMeters > 0) {
-            binding.tvDistance.text = String.format(Locale.US, "%.1f %s", value, unitText)
+            binding.tvDistance.text = "${decimalFormat.format(value)} $unitText"
         } else {
             binding.tvDistance.text = "—"
         }
