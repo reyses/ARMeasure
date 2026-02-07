@@ -11,6 +11,7 @@ import com.google.ar.core.Plane
 import com.google.ar.sceneform.AnchorNode
 import com.google.ar.sceneform.Node
 import com.google.ar.sceneform.math.Vector3
+import com.google.ar.sceneform.rendering.Material
 import com.google.ar.sceneform.rendering.MaterialFactory
 import com.google.ar.sceneform.rendering.ModelRenderable
 import com.google.ar.sceneform.rendering.ShapeFactory
@@ -34,6 +35,7 @@ class MainActivity : AppCompatActivity() {
     private var lineNode: Node? = null
 
     private var sphereRenderable: ModelRenderable? = null
+    private var yellowMaterial: Material? = null
     private var currentDistanceMeters: Float = 0f
 
     private val decimalFormat = DecimalFormat("0.0", DecimalFormatSymbols(Locale.US)).apply {
@@ -71,6 +73,11 @@ class MainActivity : AppCompatActivity() {
         MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(Color.RED))
             .thenAccept { material ->
                 sphereRenderable = ShapeFactory.makeSphere(0.015f, Vector3.zero(), material)
+            }
+
+        MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(Color.YELLOW))
+            .thenAccept { material ->
+                yellowMaterial = material
             }
     }
 
@@ -182,6 +189,7 @@ class MainActivity : AppCompatActivity() {
             vectorUp
         )
 
+        val material = yellowMaterial ?: return
         MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(Color.YELLOW))
             .thenAccept { material ->
                 val lineRenderable = ShapeFactory.makeCylinder(
@@ -193,13 +201,19 @@ class MainActivity : AppCompatActivity() {
                     material
                 )
 
-                lineNode = Node().apply {
-                    setParent(arFragment.arSceneView.scene)
-                    renderable = lineRenderable
-                    worldPosition = start
-                    worldRotation = rotationFromAToB
-                }
-            }
+        val lineRenderable = ShapeFactory.makeCylinder(
+            0.003f,
+            difference.length(),
+            Vector3(0f, difference.length() / 2, 0f),
+            material
+        )
+
+        lineNode = Node().apply {
+            setParent(arFragment.arSceneView.scene)
+            renderable = lineRenderable
+            worldPosition = start
+            worldRotation = rotationFromAToB
+        }
     }
 
     private fun drawFinalLine() {
