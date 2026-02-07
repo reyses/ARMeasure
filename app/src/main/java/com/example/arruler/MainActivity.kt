@@ -47,6 +47,8 @@ class MainActivity : AppCompatActivity() {
     private var isMeasuring = false
     private var unit = MeasurementUnit.CM
 
+    private val distanceFormatter = DistanceFormatter()
+
     enum class MeasurementUnit {
         CM, INCH, M, FT
     }
@@ -295,6 +297,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (currentDistanceMeters > 0) {
+            binding.tvDistance.text = distanceFormatter.format(value, unitText)
             binding.tvDistance.text = "${decimalFormat.format(value)} $unitText"
         } else {
             binding.tvDistance.text = "—"
