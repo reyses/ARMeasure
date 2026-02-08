@@ -40,6 +40,8 @@ class MainActivity : AppCompatActivity() {
     private val tempDiff = Vector3()
     private val tempScale = Vector3()
     private val vectorUp = Vector3.up()
+    private val startPosBuffer = FloatArray(3)
+    private val endPosBuffer = FloatArray(3)
 
     private var isMeasuring = false
     private var unit = MeasurementUnit.CM
@@ -155,19 +157,22 @@ class MainActivity : AppCompatActivity() {
         val hitResult = performHitTest() ?: return
         val hitPose = hitResult.hitPose
 
-        val startPos = startAnchor?.pose?.translation ?: return
-        val endPos = hitPose.translation
+        hitPose.getTranslation(endPosBuffer, 0)
+
+        val startAnchor = this.startAnchor ?: return
+        val startPose = startAnchor.pose
+        startPose.getTranslation(startPosBuffer, 0)
 
         // Manual distance calculation to avoid allocations
-        val dx = endPos[0] - startPos[0]
-        val dy = endPos[1] - startPos[1]
-        val dz = endPos[2] - startPos[2]
+        val dx = endPosBuffer[0] - startPosBuffer[0]
+        val dy = endPosBuffer[1] - startPosBuffer[1]
+        val dz = endPosBuffer[2] - startPosBuffer[2]
 
         currentDistanceMeters = sqrt(dx * dx + dy * dy + dz * dz)
 
         // Set temp vectors for drawing
-        tempStart.set(startPos[0], startPos[1], startPos[2])
-        tempEnd.set(endPos[0], endPos[1], endPos[2])
+        tempStart.set(startPosBuffer[0], startPosBuffer[1], startPosBuffer[2])
+        tempEnd.set(endPosBuffer[0], endPosBuffer[1], endPosBuffer[2])
 
         drawTemporaryLine(tempStart, tempEnd, currentDistanceMeters)
 
