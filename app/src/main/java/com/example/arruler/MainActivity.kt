@@ -253,10 +253,14 @@ class MainActivity : AppCompatActivity() {
         if (view.width == 0 || view.height == 0) return null
 
         val hits = frame.hitTest(view.width / 2f, view.height / 2f)
-        return hits.firstOrNull { hitResult ->
+        for (i in hits.indices) {
+            val hitResult = hits[i]
             val trackable = hitResult.trackable
-            trackable is Plane && trackable.isPoseInPolygon(hitResult.hitPose)
+            if (trackable is Plane && trackable.isPoseInPolygon(hitResult.hitPose)) {
+                return hitResult
+            }
         }
+        return null
     }
 
     private fun clearMeasurement() {
