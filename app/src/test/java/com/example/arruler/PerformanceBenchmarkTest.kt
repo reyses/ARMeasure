@@ -83,66 +83,44 @@ class PerformanceBenchmarkTest {
         sink = obj
     }
 
-    // Simulating ARCore classes for HitTest benchmark
-    data class MockHitResult(val trackable: Any)
-    data class MockPlane(val isValid: Boolean)
-
     @Test
-    fun benchmarkHitTestIteration() {
-        val hits = ArrayList<MockHitResult>()
-        for (i in 0 until 10) {
-            val isPlane = i % 2 == 0
-            val isValid = i == 6
-            val trackable = if (isPlane) MockPlane(isValid) else Any()
-            hits.add(MockHitResult(trackable))
-        }
+    fun benchmarkFormatter() {
+        val formatter = DistanceFormatter()
+        val iterations = 10_000_000
+        val value1 = 12.3456f
+        val value2 = 12.3457f // Should result in same formatted string "12.3"
+        val unit = "cm"
 
-        val iterations = 1_000_000
-
+        // Warmup
         repeat(100_000) {
-            baselineHitTest(hits)
-            optimizedHitTest(hits)
+            formatter.format(value1, unit)
+            formatter.format(value2, unit)
         }
 
-        val baselineTime = measureNanoTime {
+        // Scenario 1: Same value repeatedly (Ideal for caching)
+        val timeSameValue = measureNanoTime {
             repeat(iterations) {
-                baselineHitTest(hits)
+                formatter.format(value1, unit)
             }
         }
 
-        val optimizedTime = measureNanoTime {
+        // Scenario 2: Varying value but same output (Ideal for caching)
+        val timeVaryingValueSameOutput = measureNanoTime {
             repeat(iterations) {
-                optimizedHitTest(hits)
+                // Alternating between value1 and value2
+                formatter.format(if (it % 2 == 0) value1 else value2, unit)
             }
         }
 
-        println("HitTest Baseline Time: ${baselineTime / 1_000_000.0} ms")
-        println("HitTest Optimized Time: ${optimizedTime / 1_000_000.0} ms")
-
-        val improvement = (baselineTime - optimizedTime).toDouble() / baselineTime * 100
-        println("HitTest Improvement: ${String.format("%.2f", improvement)}%")
-
-        if (optimizedTime >= baselineTime) {
-            println("WARNING: HitTest Optimization did not improve performance.")
-        }
-    }
-
-    private fun baselineHitTest(hits: List<MockHitResult>): MockHitResult? {
-        return hits.firstOrNull { hitResult ->
-            val trackable = hitResult.trackable
-            trackable is MockPlane && trackable.isValid
-        }
-    }
-
-    private fun optimizedHitTest(hits: List<MockHitResult>): MockHitResult? {
-        val size = hits.size
-        for (i in 0 until size) {
-            val hitResult = hits[i]
-            val trackable = hitResult.trackable
-            if (trackable is MockPlane && trackable.isValid) {
-                return hitResult
+        // Scenario 3: Varying value and different output (Cache miss)
+        val timeVaryingOutput = measureNanoTime {
+            repeat(iterations) {
+                formatter.format(it.toFloat(), unit)
             }
         }
-        return null
+
+        println("Formatter - Time Same Value: ${timeSameValue / 1_000_000} ms")
+        println("Formatter - Time Varying Value (Same Output): ${timeVaryingValueSameOutput / 1_000_000} ms")
+        println("Formatter - Time Varying Output: ${timeVaryingOutput / 1_000_000} ms")
     }
 }

@@ -7,6 +7,7 @@ import com.example.arruler.databinding.ActivityMainBinding
 import com.google.ar.core.Anchor
 import com.google.ar.core.HitResult
 import com.google.ar.core.Plane
+import com.google.ar.core.Pose
 import com.google.ar.sceneform.AnchorNode
 import com.google.ar.sceneform.Node
 import com.google.ar.sceneform.math.Quaternion
@@ -17,6 +18,7 @@ import com.google.ar.sceneform.rendering.ModelRenderable
 import com.google.ar.sceneform.rendering.ShapeFactory
 import com.google.ar.sceneform.ux.ArFragment
 import kotlin.math.sqrt
+import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
 
@@ -40,6 +42,7 @@ class MainActivity : AppCompatActivity() {
     private val tempDiff = Vector3()
     private val tempScale = Vector3()
     private val vectorUp = Vector3.up()
+    private val tempRotation = Quaternion()
 
     private var isMeasuring = false
     private var unit = MeasurementUnit.CM
@@ -115,7 +118,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startMeasurement() {
-        val hitResult = performHitTest() ?: return
+        val (hitResult, _) = performHitTest() ?: return
 
         startAnchor = hitResult.createAnchor()
         startNode = AnchorNode(startAnchor).apply {
@@ -152,8 +155,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateLiveMeasurement() {
-        val hitResult = performHitTest() ?: return
-        val hitPose = hitResult.hitPose
+        val (_, hitPose) = performHitTest() ?: return
 
         val startPos = startAnchor?.pose?.translation ?: return
         val endPos = hitPose.translation
@@ -197,16 +199,114 @@ class MainActivity : AppCompatActivity() {
             tempDiff.set(0f, 0f, 0f)
         }
 
-        val rotationFromAToB = Quaternion.lookRotation(tempDiff, vectorUp)
+        setLookRotation(tempRotation, tempDiff, vectorUp)
 
         lineNode?.apply {
             if (parent == null) {
                 setParent(arFragment.arSceneView.scene)
             }
             worldPosition = start
-            worldRotation = rotationFromAToB
+            worldRotation = tempRotation
             // Scale the unit cylinder (height 1.0) to match distance
             localScale = tempScale.apply { x = 1f; y = distance; z = 1f }
+        }
+    }
+
+    private fun setLookRotation(dest: Quaternion, forward: Vector3, up: Vector3) {
+        var fx = forward.x
+        var fy = forward.y
+        var fz = forward.z
+
+        // Manual normalization
+        val lenSq = fx * fx + fy * fy + fz * fz
+        if (lenSq < 1e-6f) {
+            dest.set(0f, 0f, 0f, 1f)
+            return
+        }
+
+        if (abs(lenSq - 1.0f) > 1e-6f) {
+            val invLen = 1.0f / sqrt(lenSq)
+            fx *= invLen
+            fy *= invLen
+            fz *= invLen
+        }
+
+        // forward is -Z in local space.
+        // So z axis = -forward
+        val zx = -fx
+        val zy = -fy
+        val zz = -fz
+
+        var ux = up.x
+        var uy = up.y
+        var uz = up.z
+
+        // x = cross(up, z)
+        var xx = uy * zz - uz * zy
+        var xy = uz * zx - ux * zz
+        var xz = ux * zy - uy * zx
+
+        var xLenSq = xx * xx + xy * xy + xz * xz
+
+        if (xLenSq < 1e-6f) {
+            // Parallel. Fallback to Z axis (0,0,1) as up
+            // Or if z is Z axis, use X axis.
+            if (abs(uz) < 0.999f) {
+                ux = 0f; uy = 0f; uz = 1f
+            } else {
+                ux = 1f; uy = 0f; uz = 0f
+            }
+            xx = uy * zz - uz * zy
+            xy = uz * zx - ux * zz
+            xz = ux * zy - uy * zx
+            xLenSq = xx * xx + xy * xy + xz * xz
+        }
+
+        val xInvLen = 1.0f / sqrt(xLenSq)
+        xx *= xInvLen
+        xy *= xInvLen
+        xz *= xInvLen
+
+        // y = cross(z, x)
+        val yx = zy * xz - zz * xy
+        val yy = zz * xx - zx * xz
+        val yz = zx * xy - zy * xx
+
+        // Matrix to Quaternion
+        // m00=xx, m01=yx, m02=zx
+        // m10=xy, m11=yy, m12=zy
+        // m20=xz, m21=yz, m22=zz
+
+        val trace = xx + yy + zz
+        if (trace > 0) {
+            val s = 0.5f / sqrt(trace + 1.0f)
+            dest.w = 0.25f / s
+            dest.x = (yz - zy) * s // m21 - m12
+            dest.y = (zx - xz) * s // m02 - m20
+            dest.z = (xy - yx) * s // m10 - m01
+        } else {
+            if (xx > yy && xx > zz) {
+                val s = 2.0f * sqrt(1.0f + xx - yy - zz)
+                val invS = 1.0f / s
+                dest.w = (yz - zy) * invS
+                dest.x = 0.25f * s
+                dest.y = (xy + yx) * invS // m10 + m01
+                dest.z = (zx + xz) * invS // m02 + m20
+            } else if (yy > zz) {
+                val s = 2.0f * sqrt(1.0f + yy - xx - zz)
+                val invS = 1.0f / s
+                dest.w = (zx - xz) * invS
+                dest.x = (xy + yx) * invS
+                dest.y = 0.25f * s
+                dest.z = (yz + zy) * invS // m21 + m12
+            } else {
+                val s = 2.0f * sqrt(1.0f + zz - xx - yy)
+                val invS = 1.0f / s
+                dest.w = (xy - yx) * invS
+                dest.x = (zx + xz) * invS
+                dest.y = (yz + zy) * invS
+                dest.z = 0.25f * s
+            }
         }
     }
 
@@ -246,18 +346,18 @@ class MainActivity : AppCompatActivity() {
         updateDistanceDisplay()
     }
 
-    private fun performHitTest(): HitResult? {
+    private fun performHitTest(): Pair<HitResult, Pose>? {
         val frame = arFragment.arSceneView.arFrame ?: return null
         val view = arFragment.view ?: return null
         // Check if view has size
         if (view.width == 0 || view.height == 0) return null
 
         val hits = frame.hitTest(view.width / 2f, view.height / 2f)
-        for (i in hits.indices) {
-            val hitResult = hits[i]
+        for (hitResult in hits) {
             val trackable = hitResult.trackable
-            if (trackable is Plane && trackable.isPoseInPolygon(hitResult.hitPose)) {
-                return hitResult
+            val pose = hitResult.hitPose
+            if (trackable is Plane && trackable.isPoseInPolygon(pose)) {
+                return Pair(hitResult, pose)
             }
         }
         return null
