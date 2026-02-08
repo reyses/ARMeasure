@@ -77,7 +77,7 @@ class QuaternionBenchmarkTest {
         val qReusable = Quaternion()
         for (i in 0 until iterations) {
             setLookRotation(qReusable, forward, up)
-             if (qReusable.x > 1000) println("impossible")
+            blackhole(qReusable)
         }
         val end2 = System.nanoTime()
 
