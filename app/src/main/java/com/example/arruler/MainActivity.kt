@@ -7,6 +7,7 @@ import com.example.arruler.databinding.ActivityMainBinding
 import com.google.ar.core.Anchor
 import com.google.ar.core.HitResult
 import com.google.ar.core.Plane
+import com.google.ar.core.Pose
 import com.google.ar.sceneform.AnchorNode
 import com.google.ar.sceneform.Node
 import com.google.ar.sceneform.math.Quaternion
@@ -115,7 +116,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startMeasurement() {
-        val hitResult = performHitTest() ?: return
+        val (hitResult, _) = performHitTest() ?: return
 
         startAnchor = hitResult.createAnchor()
         startNode = AnchorNode(startAnchor).apply {
@@ -152,8 +153,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateLiveMeasurement() {
-        val hitResult = performHitTest() ?: return
-        val hitPose = hitResult.hitPose
+        val (_, hitPose) = performHitTest() ?: return
 
         val startPos = startAnchor?.pose?.translation ?: return
         val endPos = hitPose.translation
@@ -246,17 +246,21 @@ class MainActivity : AppCompatActivity() {
         updateDistanceDisplay()
     }
 
-    private fun performHitTest(): HitResult? {
+    private fun performHitTest(): Pair<HitResult, Pose>? {
         val frame = arFragment.arSceneView.arFrame ?: return null
         val view = arFragment.view ?: return null
         // Check if view has size
         if (view.width == 0 || view.height == 0) return null
 
         val hits = frame.hitTest(view.width / 2f, view.height / 2f)
-        return hits.firstOrNull { hitResult ->
+        for (hitResult in hits) {
             val trackable = hitResult.trackable
-            trackable is Plane && trackable.isPoseInPolygon(hitResult.hitPose)
+            val pose = hitResult.hitPose
+            if (trackable is Plane && trackable.isPoseInPolygon(pose)) {
+                return Pair(hitResult, pose)
+            }
         }
+        return null
     }
 
     private fun clearMeasurement() {
