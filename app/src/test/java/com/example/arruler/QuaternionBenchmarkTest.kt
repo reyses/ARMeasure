@@ -69,7 +69,7 @@ class QuaternionBenchmarkTest {
         val start1 = System.nanoTime()
         for (i in 0 until iterations) {
             val q = Quaternion.lookRotation(forward, up)
-            if (q.x > 1000) println("impossible")
+            blackhole(q)
         }
         val end1 = System.nanoTime()
 
