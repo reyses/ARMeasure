@@ -92,7 +92,7 @@ class PerformanceBenchmarkTest {
         val hits = ArrayList<MockHitResult>()
         for (i in 0 until 10) {
             val isPlane = i % 2 == 0
-            val isValid = i == 5
+            val isValid = i == 6
             val trackable = if (isPlane) MockPlane(isValid) else Any()
             hits.add(MockHitResult(trackable))
         }
