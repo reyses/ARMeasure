@@ -82,4 +82,45 @@ class PerformanceBenchmarkTest {
     private fun blackhole(obj: Any?) {
         sink = obj
     }
+
+    @Test
+    fun benchmarkFormatter() {
+        val formatter = DistanceFormatter()
+        val iterations = 10_000_000
+        val value1 = 12.3456f
+        val value2 = 12.3457f // Should result in same formatted string "12.3"
+        val unit = "cm"
+
+        // Warmup
+        repeat(100_000) {
+            formatter.format(value1, unit)
+            formatter.format(value2, unit)
+        }
+
+        // Scenario 1: Same value repeatedly (Ideal for caching)
+        val timeSameValue = measureNanoTime {
+            repeat(iterations) {
+                formatter.format(value1, unit)
+            }
+        }
+
+        // Scenario 2: Varying value but same output (Ideal for caching)
+        val timeVaryingValueSameOutput = measureNanoTime {
+            repeat(iterations) {
+                // Alternating between value1 and value2
+                formatter.format(if (it % 2 == 0) value1 else value2, unit)
+            }
+        }
+
+        // Scenario 3: Varying value and different output (Cache miss)
+        val timeVaryingOutput = measureNanoTime {
+            repeat(iterations) {
+                formatter.format(it.toFloat(), unit)
+            }
+        }
+
+        println("Formatter - Time Same Value: ${timeSameValue / 1_000_000} ms")
+        println("Formatter - Time Varying Value (Same Output): ${timeVaryingValueSameOutput / 1_000_000} ms")
+        println("Formatter - Time Varying Output: ${timeVaryingOutput / 1_000_000} ms")
+    }
 }
