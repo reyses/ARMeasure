@@ -38,6 +38,7 @@ class MainActivity : AppCompatActivity() {
     private val tempStart = Vector3()
     private val tempEnd = Vector3()
     private val tempDiff = Vector3()
+    private val tempScale = Vector3()
     private val vectorUp = Vector3.up()
 
     private var isMeasuring = false
@@ -205,7 +206,7 @@ class MainActivity : AppCompatActivity() {
             worldPosition = start
             worldRotation = rotationFromAToB
             // Scale the unit cylinder (height 1.0) to match distance
-localScale = tempScale.apply { x = 1f; y = distance; z = 1f }
+            localScale = tempScale.apply { x = 1f; y = distance; z = 1f }
         }
     }
 
