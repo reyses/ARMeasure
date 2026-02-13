@@ -85,6 +85,13 @@ class QuaternionBenchmarkTest {
         println("No-allocation method: ${(end2 - start2) / 1000000} ms")
     }
 
+    private fun blackhole(obj: Any?) {
+        // Prevent dead code elimination
+        if (obj.hashCode() == System.nanoTime().toInt()) {
+            println(obj)
+        }
+    }
+
     private fun setLookRotation(dest: Quaternion, forward: Vector3, up: Vector3) {
         // Assume forward is normalized?
         // In MainActivity usage, it is normalized.

@@ -2,6 +2,8 @@ package com.example.arruler
 
 import android.graphics.Color
 import android.os.Bundle
+import android.view.HapticFeedbackConstants
+import android.view.View
 import androidx.appcompat.app.AppCompatActivity
 import com.example.arruler.databinding.ActivityMainBinding
 import com.google.ar.core.Anchor
@@ -49,6 +51,9 @@ class MainActivity : AppCompatActivity() {
 
     private val distanceFormatter = DistanceFormatter()
 
+    // Cache a reusable HitResult pair to avoid allocation if we wanted to optimization further,
+    // but performHitTest returns a new pair anyway.
+
     enum class MeasurementUnit {
         CM, INCH, M, FT
     }
@@ -89,36 +94,82 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupListeners() {
         binding.btnMeasure.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
             if (!isMeasuring) {
-                startMeasurement()
+                if (startAnchor == null) {
+                    startMeasurement()
+                } else {
+                    // Reset to start new measurement
+                     clearMeasurement()
+                     startMeasurement()
+                }
             } else {
                 stopMeasurement()
             }
         }
 
         binding.btnClear.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
             clearMeasurement()
         }
 
         binding.btnUnit.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
             switchUnit()
         }
 
         arFragment.arSceneView.scene.addOnUpdateListener { frameTime ->
+            updateReticle()
             if (isMeasuring && startAnchor != null) {
                 updateLiveMeasurement()
             }
         }
 
         arFragment.setOnTapArPlaneListener { hitResult, plane, motionEvent ->
+            // Use screen center instead of tap if possible for consistency,
+            // but for now, tap anywhere to place is also fine.
+            // However, the UX is moving towards "Tap button to place at reticle".
+            // So we might ignore scene taps or redirect them.
+            // For now, let's keep tap-to-place as an alternative if measuring.
             if (isMeasuring && startAnchor != null) {
+                binding.root.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                 placeEndPoint(hitResult)
             }
         }
     }
 
+    private fun updateReticle() {
+        // Continuous hit test from center
+        val hitPair = performHitTest()
+        if (hitPair != null) {
+            // Hit a plane
+            binding.centerCrosshair.setColorFilter(Color.parseColor("#34C759")) // Green
+            binding.centerCrosshair.alpha = 1.0f
+
+            if (!isMeasuring) {
+                if (startAnchor == null) {
+                    binding.tvReticleInfo.text = "Tap to Start"
+                } else {
+                    binding.tvReticleInfo.text = "Tap to Measure Again"
+                }
+            }
+            // If measuring, text is handled by updateLiveMeasurement or kept as is
+        } else {
+            // No plane
+            binding.centerCrosshair.setColorFilter(Color.WHITE)
+            binding.centerCrosshair.alpha = 0.5f
+
+            if (!isMeasuring && startAnchor == null) {
+                binding.tvReticleInfo.text = "Find a surface"
+            }
+        }
+    }
+
     private fun startMeasurement() {
-        val (hitResult, _) = performHitTest() ?: return
+        val hitPair = performHitTest() ?: return
+        val (hitResult, _) = hitPair
+
+        binding.root.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
 
         startAnchor = hitResult.createAnchor()
         startNode = AnchorNode(startAnchor).apply {
@@ -147,6 +198,8 @@ class MainActivity : AppCompatActivity() {
 
         drawFinalLine()
         stopMeasurement()
+
+        binding.root.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
     }
 
     private fun stopMeasurement() {
@@ -155,12 +208,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateLiveMeasurement() {
-        val (_, hitPose) = performHitTest() ?: return
+        val pair = performHitTest() ?: return
+        val (_, hitPose) = pair
 
         val startPos = startAnchor?.pose?.translation ?: return
         val endPos = hitPose.translation
 
-        // Manual distance calculation to avoid allocations
+        // Manual distance calculation
         val dx = endPos[0] - startPos[0]
         val dy = endPos[1] - startPos[1]
         val dz = endPos[2] - startPos[2]
@@ -174,6 +228,21 @@ class MainActivity : AppCompatActivity() {
         drawTemporaryLine(tempStart, tempEnd, currentDistanceMeters)
 
         updateDistanceDisplay()
+
+        // Update Reticle Info with live distance
+        val value = when (unit) {
+            MeasurementUnit.CM -> currentDistanceMeters * 100
+            MeasurementUnit.INCH -> currentDistanceMeters * 39.37f
+            MeasurementUnit.M -> currentDistanceMeters
+            MeasurementUnit.FT -> currentDistanceMeters * 3.281f
+        }
+        val unitText = when (unit) {
+            MeasurementUnit.CM -> "cm"
+            MeasurementUnit.INCH -> "in"
+            MeasurementUnit.M -> "m"
+            MeasurementUnit.FT -> "ft"
+        }
+        binding.tvReticleInfo.text = distanceFormatter.format(value, unitText)
     }
 
     private fun drawTemporaryLine(start: Vector3, end: Vector3, distance: Float) {
@@ -188,10 +257,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Calculate rotation
-        // diff = end - start
         tempDiff.set(end.x - start.x, end.y - start.y, end.z - start.z)
 
-        // Normalize tempDiff in place if length > 0
         if (distance > 0) {
             val invDistance = 1.0f / distance
             tempDiff.set(tempDiff.x * invDistance, tempDiff.y * invDistance, tempDiff.z * invDistance)
@@ -207,7 +274,6 @@ class MainActivity : AppCompatActivity() {
             }
             worldPosition = start
             worldRotation = tempRotation
-            // Scale the unit cylinder (height 1.0) to match distance
             localScale = tempScale.apply { x = 1f; y = distance; z = 1f }
         }
     }
@@ -217,7 +283,6 @@ class MainActivity : AppCompatActivity() {
         var fy = forward.y
         var fz = forward.z
 
-        // Manual normalization
         val lenSq = fx * fx + fy * fy + fz * fz
         if (lenSq < 1e-6f) {
             dest.set(0f, 0f, 0f, 1f)
@@ -231,8 +296,6 @@ class MainActivity : AppCompatActivity() {
             fz *= invLen
         }
 
-        // forward is -Z in local space.
-        // So z axis = -forward
         val zx = -fx
         val zy = -fy
         val zz = -fz
@@ -241,7 +304,6 @@ class MainActivity : AppCompatActivity() {
         var uy = up.y
         var uz = up.z
 
-        // x = cross(up, z)
         var xx = uy * zz - uz * zy
         var xy = uz * zx - ux * zz
         var xz = ux * zy - uy * zx
@@ -249,8 +311,6 @@ class MainActivity : AppCompatActivity() {
         var xLenSq = xx * xx + xy * xy + xz * xz
 
         if (xLenSq < 1e-6f) {
-            // Parallel. Fallback to Z axis (0,0,1) as up
-            // Or if z is Z axis, use X axis.
             if (abs(uz) < 0.999f) {
                 ux = 0f; uy = 0f; uz = 1f
             } else {
@@ -267,38 +327,32 @@ class MainActivity : AppCompatActivity() {
         xy *= xInvLen
         xz *= xInvLen
 
-        // y = cross(z, x)
         val yx = zy * xz - zz * xy
         val yy = zz * xx - zx * xz
         val yz = zx * xy - zy * xx
-
-        // Matrix to Quaternion
-        // m00=xx, m01=yx, m02=zx
-        // m10=xy, m11=yy, m12=zy
-        // m20=xz, m21=yz, m22=zz
 
         val trace = xx + yy + zz
         if (trace > 0) {
             val s = 0.5f / sqrt(trace + 1.0f)
             dest.w = 0.25f / s
-            dest.x = (yz - zy) * s // m21 - m12
-            dest.y = (zx - xz) * s // m02 - m20
-            dest.z = (xy - yx) * s // m10 - m01
+            dest.x = (yz - zy) * s
+            dest.y = (zx - xz) * s
+            dest.z = (xy - yx) * s
         } else {
             if (xx > yy && xx > zz) {
                 val s = 2.0f * sqrt(1.0f + xx - yy - zz)
                 val invS = 1.0f / s
                 dest.w = (yz - zy) * invS
                 dest.x = 0.25f * s
-                dest.y = (xy + yx) * invS // m10 + m01
-                dest.z = (zx + xz) * invS // m02 + m20
+                dest.y = (xy + yx) * invS
+                dest.z = (zx + xz) * invS
             } else if (yy > zz) {
                 val s = 2.0f * sqrt(1.0f + yy - xx - zz)
                 val invS = 1.0f / s
                 dest.w = (zx - xz) * invS
                 dest.x = (xy + yx) * invS
                 dest.y = 0.25f * s
-                dest.z = (yz + zy) * invS // m21 + m12
+                dest.z = (yz + zy) * invS
             } else {
                 val s = 2.0f * sqrt(1.0f + zz - xx - yy)
                 val invS = 1.0f / s
@@ -349,7 +403,7 @@ class MainActivity : AppCompatActivity() {
     private fun performHitTest(): Pair<HitResult, Pose>? {
         val frame = arFragment.arSceneView.arFrame ?: return null
         val view = arFragment.view ?: return null
-        // Check if view has size
+
         if (view.width == 0 || view.height == 0) return null
 
         val hits = frame.hitTest(view.width / 2f, view.height / 2f)
@@ -419,17 +473,20 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateUI() {
         if (isMeasuring) {
-            binding.btnMeasure.text = "Tap to Place End"
-            binding.btnMeasure.setBackgroundColor(Color.parseColor("#FF9500"))
-            binding.tvInstructions.text = "Move phone to measure, tap screen to lock"
+            // State: Measuring
+            // Button: Stop / Place
+            binding.btnMeasure.iconTint = android.content.res.ColorStateList.valueOf(Color.parseColor("#FF9500")) // Orange
+            binding.btnMeasure.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
         } else if (startAnchor != null) {
-            binding.btnMeasure.text = "New Measurement"
-            binding.btnMeasure.setBackgroundColor(Color.parseColor("#007AFF"))
-            binding.tvInstructions.text = "Measurement complete"
+            // State: Finished
+            // Button: New
+             binding.btnMeasure.iconTint = android.content.res.ColorStateList.valueOf(Color.parseColor("#007AFF")) // Blue
+             binding.btnMeasure.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
         } else {
-            binding.btnMeasure.text = "Start Measuring"
-            binding.btnMeasure.setBackgroundColor(Color.parseColor("#34C759"))
-            binding.tvInstructions.text = "Point at a surface to begin"
+            // State: Idle
+            // Button: Start
+            binding.btnMeasure.iconTint = android.content.res.ColorStateList.valueOf(Color.BLACK)
+            binding.btnMeasure.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
         }
 
         binding.btnUnit.text = when (unit) {
