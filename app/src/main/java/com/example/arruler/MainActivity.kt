@@ -119,9 +119,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         arFragment.arSceneView.scene.addOnUpdateListener { frameTime ->
-            updateReticle()
+            val hitPair = performHitTest()
+            updateReticle(hitPair)
             if (isMeasuring && startAnchor != null) {
-                updateLiveMeasurement()
+                updateLiveMeasurement(hitPair)
             }
         }
 
@@ -138,9 +139,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateReticle() {
+    private fun updateReticle(hitPair: Pair<HitResult, Pose>?) {
         // Continuous hit test from center
-        val hitPair = performHitTest()
         if (hitPair != null) {
             // Hit a plane
             binding.centerCrosshair.setColorFilter(Color.parseColor("#34C759")) // Green
@@ -207,8 +207,8 @@ class MainActivity : AppCompatActivity() {
         updateUI()
     }
 
-    private fun updateLiveMeasurement() {
-        val pair = performHitTest() ?: return
+    private fun updateLiveMeasurement(hitPair: Pair<HitResult, Pose>?) {
+        val pair = hitPair ?: return
         val (_, hitPose) = pair
 
         val startPos = startAnchor?.pose?.translation ?: return
