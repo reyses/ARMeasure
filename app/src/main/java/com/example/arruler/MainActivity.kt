@@ -140,8 +140,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateReticle() {
         // Continuous hit test from center
-        val hitPair = performHitTest()
-        if (hitPair != null) {
+        val hitResult = performHitTest()
+        if (hitResult != null) {
             // Hit a plane
             binding.centerCrosshair.setColorFilter(Color.parseColor("#34C759")) // Green
             binding.centerCrosshair.alpha = 1.0f
@@ -166,8 +166,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startMeasurement() {
-        val hitPair = performHitTest() ?: return
-        val (hitResult, _) = hitPair
+        val hitResult = performHitTest() ?: return
 
         binding.root.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
 
@@ -208,8 +207,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateLiveMeasurement() {
-        val pair = performHitTest() ?: return
-        val (_, hitPose) = pair
+        val hitResult = performHitTest() ?: return
+        val hitPose = hitResult.hitPose
 
         val startPos = startAnchor?.pose?.translation ?: return
         val endPos = hitPose.translation
@@ -400,7 +399,7 @@ class MainActivity : AppCompatActivity() {
         updateDistanceDisplay()
     }
 
-    private fun performHitTest(): Pair<HitResult, Pose>? {
+    private fun performHitTest(): HitResult? {
         val frame = arFragment.arSceneView.arFrame ?: return null
         val view = arFragment.view ?: return null
 
@@ -409,9 +408,11 @@ class MainActivity : AppCompatActivity() {
         val hits = frame.hitTest(view.width / 2f, view.height / 2f)
         for (hitResult in hits) {
             val trackable = hitResult.trackable
-            val pose = hitResult.hitPose
-            if (trackable is Plane && trackable.isPoseInPolygon(pose)) {
-                return Pair(hitResult, pose)
+            if (trackable is Plane) {
+                val pose = hitResult.hitPose
+                if (trackable.isPoseInPolygon(pose)) {
+                    return hitResult
+                }
             }
         }
         return null
