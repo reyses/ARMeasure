@@ -51,6 +51,11 @@ class MainActivity : AppCompatActivity() {
 
     private val distanceFormatter = DistanceFormatter()
 
+    // Cached colors to avoid repeated parsing in update loops
+    private val colorGreen = Color.parseColor("#34C759")
+    private val colorOrange = Color.parseColor("#FF9500")
+    private val colorBlue = Color.parseColor("#007AFF")
+
     // Cache a reusable HitResult pair to avoid allocation if we wanted to optimization further,
     // but performHitTest returns a new pair anyway.
 
@@ -143,7 +148,7 @@ class MainActivity : AppCompatActivity() {
         val hitPair = performHitTest()
         if (hitPair != null) {
             // Hit a plane
-            binding.centerCrosshair.setColorFilter(Color.parseColor("#34C759")) // Green
+            binding.centerCrosshair.setColorFilter(colorGreen) // Green
             binding.centerCrosshair.alpha = 1.0f
 
             if (!isMeasuring) {
@@ -475,12 +480,12 @@ class MainActivity : AppCompatActivity() {
         if (isMeasuring) {
             // State: Measuring
             // Button: Stop / Place
-            binding.btnMeasure.iconTint = android.content.res.ColorStateList.valueOf(Color.parseColor("#FF9500")) // Orange
+            binding.btnMeasure.iconTint = android.content.res.ColorStateList.valueOf(colorOrange) // Orange
             binding.btnMeasure.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
         } else if (startAnchor != null) {
             // State: Finished
             // Button: New
-             binding.btnMeasure.iconTint = android.content.res.ColorStateList.valueOf(Color.parseColor("#007AFF")) // Blue
+             binding.btnMeasure.iconTint = android.content.res.ColorStateList.valueOf(colorBlue) // Blue
              binding.btnMeasure.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
         } else {
             // State: Idle
