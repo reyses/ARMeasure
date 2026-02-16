@@ -24,6 +24,12 @@ import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
 
+    companion object {
+        private val COLOR_GREEN = 0xFF34C759.toInt()
+        private val COLOR_ORANGE = 0xFFFF9500.toInt()
+        private val COLOR_BLUE = 0xFF007AFF.toInt()
+    }
+
     private lateinit var binding: ActivityMainBinding
     private lateinit var arFragment: ArFragment
 
@@ -143,7 +149,7 @@ class MainActivity : AppCompatActivity() {
         val hitPair = performHitTest()
         if (hitPair != null) {
             // Hit a plane
-            binding.centerCrosshair.setColorFilter(Color.parseColor("#34C759")) // Green
+            binding.centerCrosshair.setColorFilter(COLOR_GREEN)
             binding.centerCrosshair.alpha = 1.0f
 
             if (!isMeasuring) {
@@ -475,12 +481,12 @@ class MainActivity : AppCompatActivity() {
         if (isMeasuring) {
             // State: Measuring
             // Button: Stop / Place
-            binding.btnMeasure.iconTint = android.content.res.ColorStateList.valueOf(Color.parseColor("#FF9500")) // Orange
+            binding.btnMeasure.iconTint = android.content.res.ColorStateList.valueOf(COLOR_ORANGE)
             binding.btnMeasure.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
         } else if (startAnchor != null) {
             // State: Finished
             // Button: New
-             binding.btnMeasure.iconTint = android.content.res.ColorStateList.valueOf(Color.parseColor("#007AFF")) // Blue
+             binding.btnMeasure.iconTint = android.content.res.ColorStateList.valueOf(COLOR_BLUE)
              binding.btnMeasure.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
         } else {
             // State: Idle
