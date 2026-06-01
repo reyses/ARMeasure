@@ -37,6 +37,7 @@ class MainActivity : AppCompatActivity() {
     private var sphereRenderable: ModelRenderable? = null
     private var yellowMaterial: Material? = null
     private var cylinderRenderable: ModelRenderable? = null
+    private var redCylinderRenderable: ModelRenderable? = null
     private var currentDistanceMeters: Float = 0f
 
     private val tempStart = Vector3()
@@ -77,6 +78,12 @@ class MainActivity : AppCompatActivity() {
         MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(Color.RED))
             .thenAccept { material ->
                 sphereRenderable = ShapeFactory.makeSphere(0.015f, Vector3.zero(), material)
+                redCylinderRenderable = ShapeFactory.makeCylinder(
+                    0.005f,
+                    1.0f,
+                    Vector3(0f, 0.5f, 0f),
+                    material
+                )
             }
 
         MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(Color.YELLOW))
@@ -378,23 +385,17 @@ class MainActivity : AppCompatActivity() {
             Vector3.up()
         )
 
-        MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(Color.RED))
-            .thenAccept { material ->
-                val lineRenderable = ShapeFactory.makeCylinder(
-                    0.005f,
-                    difference.length(),
-                    Vector3(0f, difference.length() / 2, 0f),
-                    material
-                )
-
-                lineNode?.setParent(null)
-                lineNode = Node().apply {
-                    setParent(arFragment.arSceneView.scene)
-                    renderable = lineRenderable
-                    worldPosition = start
-                    worldRotation = rotationFromAToB
-                }
+        val renderable = redCylinderRenderable
+        if (renderable != null) {
+            lineNode?.setParent(null)
+            lineNode = Node().apply {
+                setParent(arFragment.arSceneView.scene)
+                this.renderable = renderable
+                worldPosition = start
+                worldRotation = rotationFromAToB
+                localScale = Vector3(1f, difference.length(), 1f)
             }
+        }
 
         currentDistanceMeters = difference.length()
         updateDistanceDisplay()
