@@ -118,10 +118,11 @@ class MainActivity : AppCompatActivity() {
             switchUnit()
         }
 
-        arFragment.arSceneView.scene.addOnUpdateListener { frameTime ->
-            updateReticle()
+        arFragment.arSceneView.scene.addOnUpdateListener { _ ->
+            val hitResult = performHitTest()
+            updateReticle(hitResult)
             if (isMeasuring && startAnchor != null) {
-                updateLiveMeasurement()
+                updateLiveMeasurement(hitResult)
             }
         }
 
@@ -138,12 +139,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateReticle() {
+    private fun updateReticle(hitResult: HitResult?) {
         // Continuous hit test from center
-        val hitPair = performHitTest()
-        if (hitPair != null) {
+
+        if (hitResult != null) {
             // Hit a plane
-            binding.centerCrosshair.setColorFilter(Color.parseColor("#34C759")) // Green
+            binding.centerCrosshair.setColorFilter(0xFF34C759.toInt()) // Green
             binding.centerCrosshair.alpha = 1.0f
 
             if (!isMeasuring) {
@@ -156,7 +157,7 @@ class MainActivity : AppCompatActivity() {
             // If measuring, text is handled by updateLiveMeasurement or kept as is
         } else {
             // No plane
-            binding.centerCrosshair.setColorFilter(Color.WHITE)
+            binding.centerCrosshair.setColorFilter(0xFFFFFFFF.toInt())
             binding.centerCrosshair.alpha = 0.5f
 
             if (!isMeasuring && startAnchor == null) {
@@ -166,8 +167,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startMeasurement() {
-        val hitPair = performHitTest() ?: return
-        val (hitResult, _) = hitPair
+        val hitResult = performHitTest() ?: return
+
 
         binding.root.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
 
@@ -207,9 +208,10 @@ class MainActivity : AppCompatActivity() {
         updateUI()
     }
 
-    private fun updateLiveMeasurement() {
-        val pair = performHitTest() ?: return
-        val (_, hitPose) = pair
+    private fun updateLiveMeasurement(hitResult: HitResult?) {
+
+        if (hitResult == null) return
+        val hitPose = hitResult.hitPose
 
         val startPos = startAnchor?.pose?.translation ?: return
         val endPos = hitPose.translation
@@ -400,23 +402,25 @@ class MainActivity : AppCompatActivity() {
         updateDistanceDisplay()
     }
 
-    private fun performHitTest(): Pair<HitResult, Pose>? {
+    private fun performHitTest(): HitResult? {
         val frame = arFragment.arSceneView.arFrame ?: return null
         val view = arFragment.view ?: return null
 
         if (view.width == 0 || view.height == 0) return null
 
         val hits = frame.hitTest(view.width / 2f, view.height / 2f)
-        for (hitResult in hits) {
+        for (i in hits.indices) {
+            val hitResult = hits[i]
             val trackable = hitResult.trackable
-            val pose = hitResult.hitPose
-            if (trackable is Plane && trackable.isPoseInPolygon(pose)) {
-                return Pair(hitResult, pose)
+            if (trackable is Plane) {
+                val pose = hitResult.hitPose
+                if (trackable.isPoseInPolygon(pose)) {
+                    return hitResult
+                }
             }
         }
         return null
     }
-
     private fun clearMeasurement() {
         startNode?.anchor?.detach()
         endNode?.anchor?.detach()
@@ -475,12 +479,12 @@ class MainActivity : AppCompatActivity() {
         if (isMeasuring) {
             // State: Measuring
             // Button: Stop / Place
-            binding.btnMeasure.iconTint = android.content.res.ColorStateList.valueOf(Color.parseColor("#FF9500")) // Orange
+            binding.btnMeasure.iconTint = android.content.res.ColorStateList.valueOf(0xFFFF9500.toInt()) // Orange
             binding.btnMeasure.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
         } else if (startAnchor != null) {
             // State: Finished
             // Button: New
-             binding.btnMeasure.iconTint = android.content.res.ColorStateList.valueOf(Color.parseColor("#007AFF")) // Blue
+             binding.btnMeasure.iconTint = android.content.res.ColorStateList.valueOf(0xFF007AFF.toInt()) // Blue
              binding.btnMeasure.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
         } else {
             // State: Idle
