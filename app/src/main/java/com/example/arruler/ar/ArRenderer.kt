@@ -10,7 +10,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.example.arruler.measure.MeasurePoint
 import com.google.android.filament.MaterialInstance
+import dev.romainguy.kotlin.math.Float2
 import dev.romainguy.kotlin.math.Float3
+import dev.romainguy.kotlin.math.Float4
 import dev.romainguy.kotlin.math.Quaternion
 import io.github.sceneview.ar.ARSceneScope
 import kotlin.math.sqrt
@@ -33,6 +35,13 @@ class ArRenderer {
     private var segmentsAreFinal by mutableStateOf(false)
     private var extras by mutableStateOf<List<Segment>>(emptyList())
     private var cloud by mutableStateOf<List<MeasurePoint>>(emptyList())
+    private var surfaces by mutableStateOf<List<SurfacePatch>>(emptyList())
+
+    /** One plane polygon ready to emit: its node frame, alpha bucket and world outline. */
+    private class PatchNodeData(
+        val id: Int, val kind: SurfaceKind, val bucket: Int, val frame: SurfaceMath.Frame,
+        val outline: List<Float3>,
+    )
 
     /**
      * Shows exactly [points] as spheres joined by segments; [closed] adds the last-to-first
@@ -60,6 +69,15 @@ class ArRenderer {
         cloud = points.take(MAX_CLOUD_POINTS)
     }
 
+    /**
+     * SURFACES overlay: every [patches] entry as a translucent filled polygon with an outline, nodes
+     * reused per [SurfacePatch.id]; patches missing from the list lose their nodes. Empty removes all.
+     */
+    fun renderSurfaces(patches: List<SurfacePatch>) {
+        surfaces = patches
+    }
+
+    /** Clears the measurement drawing; the SURFACES overlay is a view setting and stays. */
     fun clear() {
         render(emptyList())
         renderExtra(emptyList())
@@ -87,8 +105,21 @@ class ArRenderer {
         val cloudMaterial = remember(materialLoader) {
             materialLoader.createColorInstance(Color.CYAN, 0f, 0.4f, 0.5f)
         }
+        // Unlit translucent fills per kind x alpha bucket, opaque outlines per kind.
+        val fillMaterials = remember(materialLoader) {
+            SurfaceKind.values().associateWith { kind ->
+                List(SurfaceMath.ALPHA_BUCKETS) { b ->
+                    materialLoader.createUnlitColorInstance(kindColor(kind, SurfaceMath.bucketAlpha(b)))
+                }
+            }
+        }
+        val outlineMaterials = remember(materialLoader) {
+            SurfaceKind.values().associateWith { materialLoader.createUnlitColorInstance(kindColor(it, 1f)) }
+        }
         DisposableEffect(materialLoader) {
             onDispose {
+                fillMaterials.values.forEach { l -> l.forEach(materialLoader::destroyMaterialInstance) }
+                outlineMaterials.values.forEach(materialLoader::destroyMaterialInstance)
                 materialLoader.destroyMaterialInstance(pointMaterial)
                 materialLoader.destroyMaterialInstance(liveMaterial)
                 materialLoader.destroyMaterialInstance(finalMaterial)
@@ -111,6 +142,42 @@ class ArRenderer {
         }
         extras.forEachIndexed { i, s ->
             key("e$i") { SegmentNode(s, liveMaterial) }
+        }
+        val patchData = remember(surfaces) {
+            surfaces.mapNotNull { p ->
+                val frame = SurfaceMath.frameOf(p.worldPolygon) ?: return@mapNotNull null
+                PatchNodeData(
+                    p.id, p.kind, SurfaceMath.alphaBucket(p.alpha), frame,
+                    p.worldPolygon.map { Float3(it.x, it.y, it.z) },
+                )
+            }
+        }
+        patchData.forEach { d ->
+            key("surf${d.id}") {
+                val fill = fillMaterials.getValue(d.kind)[d.bucket]
+                val c = d.frame.centroid
+                val pos = Float3(c.x, c.y, c.z)
+                // Back face: mirrored path on a node turned 180 degrees about local X, so it sits where
+                // the front polygon does but faces the other way (visible from behind, whatever the culling).
+                val backRotation = d.frame.rotation * Quaternion(1f, 0f, 0f, 0f)
+                ShapeNode(
+                    polygonPath = d.frame.local.map { (x, y) -> Float2(x, y) },
+                    materialInstance = fill,
+                    position = pos,
+                    rotation = d.frame.rotation.toEulerAngles(),
+                )
+                ShapeNode(
+                    polygonPath = d.frame.local.map { (x, y) -> Float2(x, -y) },
+                    materialInstance = fill,
+                    position = pos,
+                    rotation = backRotation.toEulerAngles(),
+                )
+                PathNode(
+                    points = d.outline,
+                    closed = true,
+                    materialInstance = outlineMaterials.getValue(d.kind),
+                )
+            }
         }
         cloud.forEachIndexed { i, p ->
             key("c$i") {
@@ -144,6 +211,14 @@ class ArRenderer {
 
         /** Sphere-node budget of the scan preview (500 rather than 2,000: each is a Filament entity). */
         const val MAX_CLOUD_POINTS = 500
+
+        /** Floor green, wall blue, ceiling purple, other grey. */
+        fun kindColor(kind: SurfaceKind, alpha: Float): Float4 = when (kind) {
+            SurfaceKind.FLOOR -> Float4(0.20f, 0.78f, 0.35f, alpha)
+            SurfaceKind.WALL -> Float4(0.00f, 0.48f, 1.00f, alpha)
+            SurfaceKind.CEILING -> Float4(0.69f, 0.32f, 0.87f, alpha)
+            SurfaceKind.OTHER -> Float4(0.60f, 0.60f, 0.62f, alpha)
+        }
 
         fun segment(a: MeasurePoint, b: MeasurePoint, radius: Float): Segment {
             val length = a.distanceTo(b)

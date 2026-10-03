@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -32,6 +34,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.example.arruler.ar.ArRenderer
 import com.example.arruler.ar.ArSceneHost
 import com.example.arruler.ar.ArSessionController
+import com.example.arruler.ar.HitRanking
 import com.example.arruler.ar.RecordingFiles
 import com.example.arruler.ar.TrackEvent
 import com.example.arruler.depth.ScanAnalysis
@@ -58,6 +61,8 @@ import com.example.arruler.store.RoomCapture
 import com.example.arruler.ui.AreaControls
 import com.example.arruler.ui.ArRulerTheme
 import com.example.arruler.ui.ControlsBar
+import com.example.arruler.ui.DepthConfidenceOverlay
+import com.example.arruler.ui.SurfacesControl
 import com.example.arruler.ui.MeasureOverlay
 import com.example.arruler.ui.PlanScreen
 import com.example.arruler.ui.PlaybackBadge
@@ -82,6 +87,9 @@ class MainActivity : AppCompatActivity() {
     private val renderer = ArRenderer()
     private val session = MeasurementSession()
     private var pointCount = 0
+
+    /** True once a point of the current measurement came from a depth or feature-point hit (noisier than a plane). */
+    private var lowConfPlaced by mutableStateOf(false)
 
     // ---- SHAPES / SCAN ----
     private var appMode by mutableStateOf(AppMode.DISTANCE)
@@ -118,6 +126,7 @@ class MainActivity : AppCompatActivity() {
         ar = ArSessionController(this)
         ar.onFrame = ::onArFrame
         ar.onTap = ::onArTap
+        ar.onSurfaces = renderer::renderSurfaces
         scan = ScanController(lifecycleScope)
         handlePlaybackIntent(intent)
 
@@ -149,6 +158,12 @@ class MainActivity : AppCompatActivity() {
         setContent {
             val state by session.state.collectAsState()
             val hasSurface by ar.hasSurface.collectAsState()
+            val centerHit by ar.centerHit.collectAsState()
+            val depthHeat by ar.depthHeat.collectAsState()
+            var showPlanes by rememberSaveable { mutableStateOf(false) }
+            var showDepth by rememberSaveable { mutableStateOf(false) }
+            LaunchedEffect(showPlanes) { ar.setSurfacesEnabled(showPlanes) }
+            LaunchedEffect(showDepth) { ar.setDepthHeatEnabled(showDepth) }
             val recState by ar.recorder.state.collectAsState()
             val playback by ar.playbackStatus.collectAsState()
             val projects by repo.projects.collectAsState()
@@ -167,9 +182,12 @@ class MainActivity : AppCompatActivity() {
                     // The AR view stays composed under the other screens so the ARCore session,
                     // anchors and the shared plan frame survive a visit to Projects/Plan.
                     ArSceneHost(ar, renderer, Modifier.fillMaxSize())
+                    if (screen == Screen.Measure && showDepth) DepthConfidenceOverlay(depthHeat)
                     if (screen == Screen.Measure) {
                         Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars)) {
-                            MeasureOverlay(state, hasSurface)
+                            val liveLow = state.phase == Phase.MEASURING && centerHit?.let { HitRanking.isLowConfidence(it.quality) } == true
+                            MeasureOverlay(state, hasSurface, centerHit, lowConfPlaced || liveLow)
+                            SurfacesControl(showPlanes, showDepth, { showPlanes = it }, { showDepth = it })
                             RecordControl(
                                 state = recState,
                                 onToggle = ar.recorder::toggle,
@@ -286,7 +304,7 @@ class MainActivity : AppCompatActivity() {
         if (s.phase != Phase.MEASURING || s.points.isEmpty()) return
         val hit = ar.hitTest(x, y) ?: return
         haptic()
-        val p = ar.createAnchor(hit)
+        val p = anchorAt(hit)
         logPoint(p)
         session.addPoint(p)
     }
@@ -305,13 +323,19 @@ class MainActivity : AppCompatActivity() {
         if (session.state.value.points.isNotEmpty()) clearAll()
         val hit = ar.hitTestCenter() ?: return
         haptic()
-        val p = ar.createAnchor(hit)
+        val p = anchorAt(hit)
         pointCount = 0
         logPoint(p)
         session.start(p)
     }
 
+    private fun anchorAt(hit: ArSessionController.SurfaceHit): MeasurePoint {
+        if (HitRanking.isLowConfidence(hit.quality)) lowConfPlaced = true
+        return ar.createAnchor(hit)
+    }
+
     private fun clearAll() {
+        lowConfPlaced = false
         ar.releaseAnchors()
         session.clear()
     }
@@ -357,9 +381,9 @@ class MainActivity : AppCompatActivity() {
 
     // ---- SHAPES mode ----
 
-    private fun onShapeTap(hit: ArSessionController.PlaneHit) {
+    private fun onShapeTap(hit: ArSessionController.SurfaceHit) {
         haptic()
-        capture = capture.add(ar.createAnchor(hit))
+        capture = capture.add(anchorAt(hit))
         renderShapes()
     }
 
@@ -407,10 +431,10 @@ class MainActivity : AppCompatActivity() {
         val s = session.state.value
         val hit = ar.hitTestCenter() ?: return
         when {
-            s.heightActive -> { haptic(); session.commitHeight(ar.createAnchor(hit)) }
-            s.closed -> { clearAll(); haptic(); session.start(ar.createAnchor(hit)) }
-            s.phase == Phase.MEASURING && s.points.isNotEmpty() -> { haptic(); session.addPoint(ar.createAnchor(hit)) }
-            else -> { clearAll(); haptic(); session.start(ar.createAnchor(hit)) }
+            s.heightActive -> { haptic(); session.commitHeight(anchorAt(hit)) }
+            s.closed -> { clearAll(); haptic(); session.start(anchorAt(hit)) }
+            s.phase == Phase.MEASURING && s.points.isNotEmpty() -> { haptic(); session.addPoint(anchorAt(hit)) }
+            else -> { clearAll(); haptic(); session.start(anchorAt(hit)) }
         }
     }
 

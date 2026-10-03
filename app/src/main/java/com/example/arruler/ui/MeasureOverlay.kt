@@ -27,18 +27,26 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.arruler.DistanceFormatter
 import com.example.arruler.R
+import com.example.arruler.ar.HitInfo
+import com.example.arruler.ar.HitQuality
+import com.example.arruler.ar.HitRanking
 import com.example.arruler.measure.MeasureMode
 import com.example.arruler.measure.MeasureState
 import com.example.arruler.measure.Phase
 
 /** Crosshair, reticle hint and the top distance read-out. Driven only by state. */
 @Composable
-fun BoxScope.MeasureOverlay(state: MeasureState, hasSurface: Boolean) {
+fun BoxScope.MeasureOverlay(
+    state: MeasureState,
+    hasSurface: Boolean,
+    hit: HitInfo? = null,
+    lowConfidence: Boolean = false,
+) {
     val formatter = remember { DistanceFormatter() }
     val distanceText = formatter.format(state.unit.fromMeters(state.lengthMeters), state.unit.symbol)
 
     val crosshairColor by animateColorAsState(
-        if (hasSurface) Color(0xFF34C759) else Color.White,
+        hit?.let { qualityColor(it.quality) } ?: if (hasSurface) Color(0xFF34C759) else Color.White,
         label = "crosshairColor"
     )
     val crosshairAlpha by animateFloatAsState(if (hasSurface) 1.0f else 0.5f, label = "crosshairAlpha")
@@ -79,7 +87,31 @@ fun BoxScope.MeasureOverlay(state: MeasureState, hasSurface: Boolean) {
         }
     }
 
+    if (hit != null) {
+        Text(
+            text = HitRanking.label(hit),
+            color = qualityColor(hit.quality).copy(alpha = 0.9f),
+            fontSize = 11.sp,
+            modifier = Modifier.align(Alignment.Center).offset(y = 92.dp),
+        )
+    }
+
     AreaReadout(state)
+
+    if (lowConfidence) {
+        Text(
+            text = "± lower confidence",
+            color = Color(0xFFFFD60A),
+            fontWeight = FontWeight.Bold,
+            fontSize = 12.sp,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = if (state.mode == MeasureMode.AREA) 150.dp else 88.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color.Black.copy(alpha = 0.45f))
+                .padding(horizontal = 10.dp, vertical = 4.dp),
+        )
+    }
 
     if (state.mode == MeasureMode.DISTANCE && state.lengthMeters > 0) {
         Box(
@@ -95,4 +127,12 @@ fun BoxScope.MeasureOverlay(state: MeasureState, hasSurface: Boolean) {
             }
         }
     }
+}
+
+/** Crosshair colour by hit quality: plane green, extended plane light green, depth yellow, points orange. */
+fun qualityColor(q: HitQuality): Color = when (q) {
+    HitQuality.PLANE -> Color(0xFF34C759)
+    HitQuality.PLANE_EXTENDED -> Color(0xFFA8E6A1)
+    HitQuality.DEPTH -> Color(0xFFFFD60A)
+    HitQuality.POINT -> Color(0xFFFF9500)
 }
