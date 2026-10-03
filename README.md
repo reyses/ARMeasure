@@ -3,13 +3,12 @@
 A production-ready AR ruler application optimized for Android flagship devices, including Google Pixel 11 Pro.
 
 ## Features
-- 📏 Real-time distance measurement
-- 🎯 Center crosshair for accurate aiming
-- 📐 Multiple units: CM, Inches, Meters, Feet
-- 🎨 Clean, modern UI with adaptive Edge-to-Edge support
-- ⚡ Live measurement updates
-- 🔒 Lock measurements by tapping
-- 📱 Fully compatible with Pixel 11 Pro display cutouts, gesture navigation, and 64-bit architecture
+- Distance: two-point and polyline measuring with a center crosshair, units CM / in / m / ft
+- Area and volume: tap a polygon outline, close it, add a ceiling height
+- Shapes: box, cylinder, cone, sphere, frustum and pile volume and surface area from a few taps
+- Scan (devices with ARCore depth): sweep a room, get area, perimeter, height, volume and wall count
+- Projects: save rooms into projects, view the floor plan, export it
+- Recording and playback of AR sessions (MP4 datasets)
 
 ## Requirements
  - Android Studio Rabbit 1 (2026.2.1, build 262.x) or newer; this is the build the project was verified with (Google's AGP 9.4 notes do not state a minimum Studio version)

@@ -48,7 +48,7 @@ fun BoxScope.ShapeControls(
     Column(
         modifier = Modifier
             .align(Alignment.BottomCenter)
-            .padding(bottom = 136.dp, start = 12.dp, end = 12.dp),
+            .padding(bottom = 192.dp, start = 12.dp, end = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {

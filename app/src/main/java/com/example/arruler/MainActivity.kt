@@ -3,6 +3,7 @@ package com.example.arruler
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.HapticFeedbackConstants
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -33,12 +34,19 @@ import com.example.arruler.ar.ArSceneHost
 import com.example.arruler.ar.ArSessionController
 import com.example.arruler.ar.RecordingFiles
 import com.example.arruler.ar.TrackEvent
+import com.example.arruler.depth.ScanAnalysis
+import com.example.arruler.depth.ScanController
+import com.example.arruler.depth.floorPolygon3d
+import com.example.arruler.measure.AppMode
 import com.example.arruler.measure.MeasureMode
 import com.example.arruler.measure.MeasurePoint
 import com.example.arruler.measure.MeasureState
 import com.example.arruler.measure.MeasurementSession
 import com.example.arruler.measure.Phase
 import com.example.arruler.measure.Units
+import com.example.arruler.measure.shapes.ShapeCapture
+import com.example.arruler.measure.shapes.ShapeKind
+import com.example.arruler.measure.shapes.ShapePreview
 import com.example.arruler.measure.toVec3
 import com.example.arruler.nav.Screen
 import com.example.arruler.plan.ExportFormat
@@ -57,6 +65,8 @@ import com.example.arruler.ui.ProjectChoice
 import com.example.arruler.ui.ProjectsButton
 import com.example.arruler.ui.ProjectsScreen
 import com.example.arruler.ui.RecordControl
+import com.example.arruler.ui.ScanControls
+import com.example.arruler.ui.ShapeControls
 import com.example.arruler.ui.SaveRoomDraft
 import com.example.arruler.ui.SaveRoomPill
 import com.example.arruler.ui.SaveRoomSheet
@@ -72,6 +82,12 @@ class MainActivity : AppCompatActivity() {
     private val renderer = ArRenderer()
     private val session = MeasurementSession()
     private var pointCount = 0
+
+    // ---- SHAPES / SCAN ----
+    private var appMode by mutableStateOf(AppMode.DISTANCE)
+    private var capture by mutableStateOf(ShapeCapture(ShapeKind.BOX))
+    private lateinit var scan: ScanController
+    private var scanSaved by mutableStateOf(false)
 
     // ---- plan / projects ----
     private lateinit var repo: ProjectRepository
@@ -102,6 +118,7 @@ class MainActivity : AppCompatActivity() {
         ar = ArSessionController(this)
         ar.onFrame = ::onArFrame
         ar.onTap = ::onArTap
+        scan = ScanController(lifecycleScope)
         handlePlaybackIntent(intent)
 
         lifecycleScope.launch {
@@ -123,12 +140,23 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                scan.preview.collect { if (appMode == AppMode.SCAN) renderer.renderCloud(it) }
+            }
+        }
+
         setContent {
             val state by session.state.collectAsState()
             val hasSurface by ar.hasSurface.collectAsState()
             val recState by ar.recorder.state.collectAsState()
             val playback by ar.playbackStatus.collectAsState()
             val projects by repo.projects.collectAsState()
+            val scanAvailable by ar.depthSupported.collectAsState()
+            val scanning by scan.scanning.collectAsState()
+            val analyzing by scan.analyzing.collectAsState()
+            val scanStats by scan.stats.collectAsState()
+            val scanAnalysis by scan.analysis.collectAsState()
             val view = LocalView.current
             DisposableEffect(view) {
                 haptic = { view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK) }
@@ -152,11 +180,29 @@ class MainActivity : AppCompatActivity() {
                                 state = state,
                                 onToggleUnit = session::nextUnit,
                                 onMainButton = ::onMainButton,
-                                onClear = ::clearAll,
+                                onClear = ::onClear,
                             )
-                            AreaControls(state, ::onSetMode, ::onAreaClose, ::onAreaUndo, ::onAreaHeight)
+                            AreaControls(state, appMode, scanAvailable, ::onSetAppMode, ::onAreaClose, ::onAreaUndo, ::onAreaHeight)
+                            when (appMode) {
+                                AppMode.SHAPES -> ShapeControls(
+                                    capture, state.unit, ::onShapeKind, ::onShapeUndo, ::onShapeDone, ::onShapeReset,
+                                )
+                                AppMode.SCAN -> ScanControls(
+                                    scanning = scanning,
+                                    analyzing = analyzing,
+                                    stats = scanStats,
+                                    analysis = scanAnalysis,
+                                    savable = scanAnalysis is ScanAnalysis.Room && !scanSaved,
+                                    units = state.unit,
+                                    onStartPause = ::onScanStartPause,
+                                    onReset = ::onScanReset,
+                                    onAnalyze = ::onScanAnalyze,
+                                    onSave = ::onSaveScanRoom,
+                                )
+                                else -> {}
+                            }
                             ProjectsButton { screen = Screen.Projects }
-                            if (state.mode == MeasureMode.AREA && state.closed && !state.heightActive &&
+                            if (appMode == AppMode.AREA && state.closed && !state.heightActive &&
                                 savedFor != Pair(state.points, state.heightPoint)
                             ) {
                                 SaveRoomPill(::onSaveRoomPill)
@@ -217,6 +263,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun onArFrame() {
         if (screen != Screen.Measure) return
+        if (appMode == AppMode.SCAN) {
+            ar.latestFrame?.let { scan.onFrame(it, SystemClock.elapsedRealtime()) }
+            return
+        }
+        if (appMode == AppMode.SHAPES) return
         areaFrame()
         if (session.state.value.phase == Phase.MEASURING) {
             ar.hitTestCenter()?.let { session.setLive(it.point) }
@@ -225,6 +276,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun onArTap(x: Float, y: Float) {
         if (screen != Screen.Measure) return
+        if (appMode == AppMode.SCAN) return
+        if (appMode == AppMode.SHAPES) {
+            ar.hitTest(x, y)?.let(::onShapeTap)
+            return
+        }
         val s = session.state.value
         if (s.mode == MeasureMode.AREA) return
         if (s.phase != Phase.MEASURING || s.points.isEmpty()) return
@@ -236,6 +292,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onMainButton() {
+        if (appMode == AppMode.SCAN) return onScanStartPause()
+        if (appMode == AppMode.SHAPES) {
+            ar.hitTestCenter()?.let(::onShapeTap)
+            return
+        }
         if (session.state.value.mode == MeasureMode.AREA) return onAreaShutter()
         if (session.state.value.phase == Phase.MEASURING) {
             session.stop()
@@ -258,6 +319,8 @@ class MainActivity : AppCompatActivity() {
     // ---- AREA mode (additive) ----
 
     private fun renderMeasureState(s: MeasureState) {
+        if (appMode == AppMode.SHAPES) return renderShapes()
+        if (appMode == AppMode.SCAN) return
         if (s.mode == MeasureMode.AREA) {
             renderer.render(s.displayPoints, closed = s.closed, final = s.closed)
             val hp = s.heightPoint
@@ -276,10 +339,68 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun onSetMode(mode: MeasureMode) {
-        if (session.state.value.mode == mode) return
+    private fun onSetAppMode(mode: AppMode) {
+        if (appMode == mode) return
+        if (mode == AppMode.SCAN && !ar.setDepthEnabled(true)) return toast("Depth could not be enabled")
+        if (appMode == AppMode.SCAN) {
+            scan.reset()
+            ar.setDepthEnabled(false)
+            scanSaved = false
+        }
         clearAll()
-        session.setMode(mode)
+        renderer.clear()
+        appMode = mode
+        session.setMode(mode.sessionMode)
+        capture = ShapeCapture(capture.kind)
+        if (mode == AppMode.SHAPES) renderShapes()
+    }
+
+    // ---- SHAPES mode ----
+
+    private fun onShapeTap(hit: ArSessionController.PlaneHit) {
+        haptic()
+        capture = capture.add(ar.createAnchor(hit))
+        renderShapes()
+    }
+
+    private fun renderShapes() {
+        renderer.render(capture.points)
+        renderer.renderExtra(ShapePreview.segments(capture))
+    }
+
+    private fun onShapeKind(k: ShapeKind) { capture = ShapeCapture(k); renderShapes() }
+    private fun onShapeUndo() { capture = capture.undo(); renderShapes() }
+    private fun onShapeDone() { capture = capture.closeBase(); renderShapes() }
+    private fun onShapeReset() { capture = capture.reset(); renderShapes() }
+
+    // ---- SCAN mode ----
+
+    private fun onScanStartPause() { if (scan.scanning.value) scan.pause() else scan.start() }
+
+    private fun onScanReset() {
+        scan.reset()
+        scanSaved = false
+        renderer.renderCloud(emptyList())
+    }
+
+    private fun onScanAnalyze() {
+        scanSaved = false
+        scan.analyze()
+    }
+
+    /** Lifts the scanned floor polygon back to 3D at floorY and reuses the AREA save path. */
+    private fun onSaveScanRoom() {
+        val room = scan.analysis.value as? ScanAnalysis.Room ?: return
+        val captured = RoomCapture.capture(room.model.floorPolygon3d(), planFrame)
+        saveDraft = SaveRoomDraft(captured, room.heightM)
+    }
+
+    private fun onClear() {
+        when (appMode) {
+            AppMode.SHAPES -> onShapeReset()
+            AppMode.SCAN -> onScanReset()
+            else -> clearAll()
+        }
     }
 
     private fun onAreaShutter() {
@@ -323,6 +444,7 @@ class MainActivity : AppCompatActivity() {
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_LAST_PROJECT, project.id).apply()
             val s = session.state.value
             savedFor = s.points to s.heightPoint
+            if (appMode == AppMode.SCAN) scanSaved = true
             saveDraft = null
             toast("Saved to ${project.name}")
         } catch (e: IOException) {
@@ -361,6 +483,7 @@ class MainActivity : AppCompatActivity() {
 
     /** The playback session is a new world frame, so the measurement, its anchors and the plan frame are dropped. */
     private fun launchPlayback(uri: Uri) {
+        onSetAppMode(AppMode.DISTANCE)
         clearAll()
         planFrame = null
         screen = Screen.Measure

@@ -20,6 +20,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.arruler.measure.AppMode
 import com.example.arruler.measure.MeasureMode
 import com.example.arruler.measure.MeasureState
 
@@ -70,20 +71,22 @@ fun BoxScope.AreaReadout(state: MeasureState) {
 }
 
 /**
- * Mode switch (DISTANCE | AREA) and, in AREA mode, the Close / Undo / Height pills. Sits above the
+ * Mode switch (DISTANCE | AREA | SHAPES | SCAN, the last only when depth is supported)| AREA) and, in AREA mode, the Close / Undo / Height pills. Sits above the
  * controls bar. Fires haptics, then the callbacks.
  */
 @Composable
 fun BoxScope.AreaControls(
     state: MeasureState,
-    onSetMode: (MeasureMode) -> Unit,
+    appMode: AppMode,
+    scanAvailable: Boolean,
+    onSetMode: (AppMode) -> Unit,
     onClose: () -> Unit,
     onUndo: () -> Unit,
     onHeight: () -> Unit,
 ) {
     val view = LocalView.current
     val haptic = { view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); Unit }
-    val area = state.mode == MeasureMode.AREA
+    val area = appMode == AppMode.AREA
 
     Column(
         modifier = Modifier
@@ -107,8 +110,12 @@ fun BoxScope.AreaControls(
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            GlassPill("DISTANCE", Color.White, selected = !area) { haptic(); onSetMode(MeasureMode.DISTANCE) }
-            GlassPill("AREA", Color.White, selected = area) { haptic(); onSetMode(MeasureMode.AREA) }
+            GlassPill("DISTANCE", Color.White, selected = appMode == AppMode.DISTANCE) { haptic(); onSetMode(AppMode.DISTANCE) }
+            GlassPill("AREA", Color.White, selected = area) { haptic(); onSetMode(AppMode.AREA) }
+            GlassPill("SHAPES", Color.White, selected = appMode == AppMode.SHAPES) { haptic(); onSetMode(AppMode.SHAPES) }
+            if (scanAvailable) {
+                GlassPill("SCAN", Color.White, selected = appMode == AppMode.SCAN) { haptic(); onSetMode(AppMode.SCAN) }
+            }
         }
     }
 }
@@ -120,7 +127,7 @@ internal fun GlassPill(label: String, tint: Color, selected: Boolean = false, on
             .clip(RoundedCornerShape(24.dp))
             .background(if (selected) Color(0xFF007AFF).copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.4f))
             .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 10.dp),
+            .padding(horizontal = 14.dp, vertical = 10.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(label, color = tint, fontWeight = FontWeight.Bold, fontSize = 14.sp)

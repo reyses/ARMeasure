@@ -30,8 +30,21 @@ class DepthFrameSampler(
 ) {
     init { require(step >= 1) }
 
+    /**
+     * Depth + confidence copied out of a Frame's Images, so the Images can be closed on the frame
+     * callback thread while [process] runs elsewhere. [depthMm] / [conf] are w*h, row-major.
+     */
+    class RawDepth(
+        val w: Int, val h: Int,
+        val depthMm: ShortArray, val conf: ByteArray,
+        val intrinsics: Intrinsics, val pose: FloatArray,
+    )
+
     /** Returns null when depth is not available yet (warm-up, disabled mode, unsupported). */
-    fun sample(frame: Frame): DepthSample? {
+    fun sample(frame: Frame): DepthSample? = acquire(frame)?.let(::process)
+
+    /** Acquires and copies the depth images (call on the frame callback thread); null if unavailable. */
+    fun acquire(frame: Frame): RawDepth? {
         var depth: Image? = null
         var conf: Image? = null
         try {
@@ -62,36 +75,47 @@ class DepthFrameSampler(
             val cBuf = cPlane.buffer
             val dRow = dPlane.rowStride; val dPix = dPlane.pixelStride
             val cRow = cPlane.rowStride; val cPix = cPlane.pixelStride
-
-            val maxPts = ((w + step - 1) / step) * ((h + step - 1) / step)
-            val xyz = FloatArray(maxPts * 3)
-            val cf = FloatArray(maxPts)
-            val tmp = FloatArray(3)
-            val minMm = (minDepthM * 1000f).toInt(); val maxMm = (maxDepthM * 1000f).toInt()
-            val minC = (minConfidence * 255f).toInt()
-            var n = 0
-            var v = 0
-            while (v < h) {
-                var u = 0
-                while (u < w) {
-                    val mm = dBuf.getShort(v * dRow + u * dPix).toInt() and 0xFFFF
-                    if (mm in minMm..maxMm) {
-                        val c = cBuf.get(v * cRow + u * cPix).toInt() and 0xFF
-                        if (c >= minC) {
-                            DepthMath.unproject(u.toFloat(), v.toFloat(), mm, k, tmp)
-                            DepthMath.transformPoint(pose, tmp[0], tmp[1], tmp[2], xyz, n * 3)
-                            cf[n] = c / 255f
-                            n++
-                        }
-                    }
-                    u += step
-                }
-                v += step
+            val d = ShortArray(w * h)
+            val c = ByteArray(w * h)
+            for (v in 0 until h) for (u in 0 until w) {
+                d[v * w + u] = dBuf.getShort(v * dRow + u * dPix)
+                c[v * w + u] = cBuf.get(v * cRow + u * cPix)
             }
-            return DepthSample(xyz.copyOf(n * 3), cf.copyOf(n))
+            return RawDepth(w, h, d, c, k, pose)
         } finally {
             conf?.close()
             depth?.close()
         }
+    }
+
+    /** Unprojects the copied depth into world points; pure, safe on any thread. */
+    fun process(raw: RawDepth): DepthSample {
+        val w = raw.w; val h = raw.h
+        val maxPts = ((w + step - 1) / step) * ((h + step - 1) / step)
+        val xyz = FloatArray(maxPts * 3)
+        val cf = FloatArray(maxPts)
+        val tmp = FloatArray(3)
+        val minMm = (minDepthM * 1000f).toInt(); val maxMm = (maxDepthM * 1000f).toInt()
+        val minC = (minConfidence * 255f).toInt()
+        var n = 0
+        var v = 0
+        while (v < h) {
+            var u = 0
+            while (u < w) {
+                val mm = raw.depthMm[v * w + u].toInt() and 0xFFFF
+                if (mm in minMm..maxMm) {
+                    val c = raw.conf[v * w + u].toInt() and 0xFF
+                    if (c >= minC) {
+                        DepthMath.unproject(u.toFloat(), v.toFloat(), mm, raw.intrinsics, tmp)
+                        DepthMath.transformPoint(raw.pose, tmp[0], tmp[1], tmp[2], xyz, n * 3)
+                        cf[n] = c / 255f
+                        n++
+                    }
+                }
+                u += step
+            }
+            v += step
+        }
+        return DepthSample(xyz.copyOf(n * 3), cf.copyOf(n))
     }
 }

@@ -54,6 +54,10 @@ class ArSessionController(context: Context) {
     /** True while the screen centre points at a detected plane. */
     val hasSurface: StateFlow<Boolean> = _hasSurface.asStateFlow()
 
+    private val _depthSupported = MutableStateFlow(false)
+    /** True once a session exists and supports RAW_DEPTH_ONLY or AUTOMATIC depth (gates the SCAN mode). */
+    val depthSupported: StateFlow<Boolean> = _depthSupported.asStateFlow()
+
     private val _trackingState = MutableStateFlow(TrackingState.STOPPED)
     val trackingState: StateFlow<TrackingState> = _trackingState.asStateFlow()
 
@@ -121,6 +125,38 @@ class ArSessionController(context: Context) {
     internal fun onSessionCreated(session: Session) {
         knownSession = session
         lastFrame = null
+        _depthSupported.value = pickDepthMode(session) != null
+    }
+
+    /** RAW_DEPTH_ONLY if the device supports it, else AUTOMATIC, else null. */
+    private fun pickDepthMode(session: Session): Config.DepthMode? = when {
+        session.isDepthModeSupported(Config.DepthMode.RAW_DEPTH_ONLY) -> Config.DepthMode.RAW_DEPTH_ONLY
+        session.isDepthModeSupported(Config.DepthMode.AUTOMATIC) -> Config.DepthMode.AUTOMATIC
+        else -> null
+    }
+
+    /**
+     * Switches depth on (RAW_DEPTH_ONLY, else AUTOMATIC) or off on the LIVE session: reads
+     * `session.config`, sets `depthMode` and calls `Session.configure(config)` (ARCore allows this
+     * while the session runs). [depthMode] is updated too so a rebuilt session (playback, view
+     * recreation) gets the same mode through [configureSession]. Returns false if depth is
+     * unsupported or there is no live session.
+     */
+    fun setDepthEnabled(on: Boolean): Boolean {
+        val s = currentSession()
+        val mode = if (!on) Config.DepthMode.DISABLED else (s?.let(::pickDepthMode) ?: return false)
+        depthMode = mode
+        if (s == null) return false
+        return try {
+            val cfg = s.config
+            cfg.depthMode = mode
+            s.configure(cfg)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "configure(depthMode=$mode) failed", e)
+            depthMode = Config.DepthMode.DISABLED
+            false
+        }
     }
 
     internal fun onSessionPaused(@Suppress("UNUSED_PARAMETER") session: Session) {

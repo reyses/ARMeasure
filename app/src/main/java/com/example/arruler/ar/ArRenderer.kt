@@ -32,6 +32,7 @@ class ArRenderer {
     private var segments by mutableStateOf<List<Segment>>(emptyList())
     private var segmentsAreFinal by mutableStateOf(false)
     private var extras by mutableStateOf<List<Segment>>(emptyList())
+    private var cloud by mutableStateOf<List<MeasurePoint>>(emptyList())
 
     /**
      * Shows exactly [points] as spheres joined by segments; [closed] adds the last-to-first
@@ -54,9 +55,15 @@ class ArRenderer {
         extras = segments.map { (a, b) -> segment(a, b, LIVE_RADIUS) }
     }
 
+    /** Scan preview: [points] as tiny spheres (5 mm), separate from [render]; empty list removes them. */
+    fun renderCloud(points: List<MeasurePoint>) {
+        cloud = points.take(MAX_CLOUD_POINTS)
+    }
+
     fun clear() {
         render(emptyList())
         renderExtra(emptyList())
+        renderCloud(emptyList())
     }
 
     fun release() {
@@ -77,11 +84,15 @@ class ArRenderer {
         val finalMaterial = remember(materialLoader) {
             materialLoader.createColorInstance(Color.RED, 0f, 0.4f, 0.5f)
         }
+        val cloudMaterial = remember(materialLoader) {
+            materialLoader.createColorInstance(Color.CYAN, 0f, 0.4f, 0.5f)
+        }
         DisposableEffect(materialLoader) {
             onDispose {
                 materialLoader.destroyMaterialInstance(pointMaterial)
                 materialLoader.destroyMaterialInstance(liveMaterial)
                 materialLoader.destroyMaterialInstance(finalMaterial)
+                materialLoader.destroyMaterialInstance(cloudMaterial)
             }
         }
 
@@ -100,6 +111,15 @@ class ArRenderer {
         }
         extras.forEachIndexed { i, s ->
             key("e$i") { SegmentNode(s, liveMaterial) }
+        }
+        cloud.forEachIndexed { i, p ->
+            key("c$i") {
+                SphereNode(
+                    radius = CLOUD_RADIUS,
+                    materialInstance = cloudMaterial,
+                    position = Float3(p.x, p.y, p.z),
+                )
+            }
         }
     }
 
@@ -120,6 +140,10 @@ class ArRenderer {
         const val POINT_RADIUS = 0.015f
         const val LIVE_RADIUS = 0.003f
         const val FINAL_RADIUS = 0.005f
+        const val CLOUD_RADIUS = 0.005f
+
+        /** Sphere-node budget of the scan preview (500 rather than 2,000: each is a Filament entity). */
+        const val MAX_CLOUD_POINTS = 500
 
         fun segment(a: MeasurePoint, b: MeasurePoint, radius: Float): Segment {
             val length = a.distanceTo(b)
