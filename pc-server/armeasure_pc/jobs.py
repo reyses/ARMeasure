@@ -264,7 +264,7 @@ class JobManager:
             self._update(job_id, state="FAILED", stage="failed", message=f"internal error: {type(e).__name__}: {e}")
         finally:
             self.cancel_flags.discard(job_id)
-            shutil.rmtree(work, ignore_errors=True)
+            (None if os.environ.get("ARMEASURE_KEEP_WORK") else shutil.rmtree(work, ignore_errors=True))
             # keep upload only while useful; drop it once finished to save disk
             try:
                 (d / "upload.zip").unlink()

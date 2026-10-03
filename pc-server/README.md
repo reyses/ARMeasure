@@ -126,3 +126,82 @@ From the research brief (`docs/research/dji_photogrammetry_brief_agy.md` section
 relative (distances inside the model) about 1-3 %; absolute horizontal about 1.5-3 m; absolute vertical worse
 (barometric drift). Use relative measurements; the absolute position is only as good as the drone's GPS. Ground control
 points (the `gcp` manifest field) are reserved for later.
+
+## Measured accuracy and timing (synthetic scenes, this PC, 2026-10-03)
+
+PC: Ryzen 5 5600X (12 threads), 16 GB, RTX 3060 12 GB, COLMAP 4.2.1 CUDA, OpenMVS 2.4.0 CUDA. The scenes have known
+geometry and are rendered by `tests/synth/render_scene.py` (numpy ray caster, textured boxes, 2x2 supersampling):
+
+- Phone: 200 mm cube with 1024 px random textures on a 2 x 2 m textured ground, 60 views on two orbits (radius 0.45 m,
+  heights 0.15 / 0.35 m above the top face), 1280 x 960, fx = fy = 1000, true poses in the ARCore convention.
+  Variant `per_image_focal_jitter`: focal length +-1 % per image.
+- Drone: 10 x 6 x 4 m textured house on a 60 x 60 m textured ground, 40 images (5 x 8 snake grid, 30 m altitude, 75 %
+  overlap, 12 of them oblique at the house), 1600 x 1200, EXIF GPS (WGS84 around 33.0 N, 117.0 W), DJI XMP,
+  FocalLength 6.72 mm, FC3170. Variant `noisy_gps`: 0.5 m horizontal / 1 m vertical GPS noise per image.
+
+Run the end-to-end tests (about 33 min; scenes are rendered once into `_e2e_data/`, gitignored):
+
+```powershell
+$env:ARMEASURE_E2E = "1"; C:\venvs\armeasure-pc\Scripts\python.exe -m pytest -q -m gpu_e2e -s
+```
+
+Plain `pytest -q` skips them (`@pytest.mark.gpu_e2e`; also skipped when a tool is missing). Each test writes
+`_e2e_data/report_<name>.json`.
+
+### Phone cube (PHOTOGRAMMETRY), result.json vs truth 200 x 200 x 200 mm = 8000 cm3
+
+| run | sides L / W / H (mm) | error (mm) | volume (cm3) | volume error | mesh to truth, cube part: rms / p99 / max (mm) | sparse: images, points, reproj. error |
+|---|---|---|---|---|---|---|
+| shared intrinsics | 201.65 / 201.40 / 202.08 | +1.65 / +1.40 / +2.08 | 8117 | +1.5 % | 0.26 / 1.05 / 1.97 | 60 / 60, 54164, 0.40 px |
+| focal jitter 1 % | 202.16 / 201.62 / 201.87 | +2.16 / +1.62 / +1.87 | 8132 | +1.7 % | 0.29 / 1.11 / 2.19 | 60 / 60 |
+
+The mesh surface lies within 0.3 mm rms of the true cube; the +1.4 to +2.2 mm in the box sides is the oriented box of
+the mesh vertices touching the few outliers of the cube edges and base (largest 2.2 mm). Tolerance in the test: sides +-3 mm,
+volume +-3 %, cube mesh rms < 0.75 mm.
+
+### Drone house (DRONE_PHOTOS), cloud and result.json vs truth
+
+| run | images registered | alignment rmse (m) | house x / y / height (m) | scale error | ground plane tilt | ground_area_m2 vs 3600 m2 | house centre error |
+|---|---|---|---|---|---|---|---|
+| exact GPS | 40 / 40 | 0.003 | 9.961 / 5.946 / 4.016 (truth 10 / 6 / 4) | -0.30 % | 0.002 deg | 3622.6 (+0.63 %) | 0.00 / 0.02 m |
+| noisy GPS 0.5 / 1 m | 40 / 40 | 0.992 (the GPS noise) | 9.969 / 5.943 / 3.997 | -0.45 % | 0.73 deg | 3614.3 (+0.40 %) | -0.41 / -0.10 m, ground height -0.30 m |
+
+Scale error = mean of the three house ratios minus 1. With noisy GPS the model is still metric to about 0.5 %, but it is
+shifted by the GPS error (0.4 m horizontal, 0.3 m vertical here) and tilted 0.7 deg, because the camera centres all lie in
+one plane (30 m altitude) so the GPS fit cannot pin the tilt: absolute position and slope are only as good as the GPS, as
+the "Expected accuracy" section says; distances inside the model are good. Wall points are sparse (8 to 32 points):
+the oblique views reconstruct the roof and ground, hardly the walls, so `extent_m` z is roof height only.
+
+### Wall-clock per stage (s), OpenMVS on the CPU (see below)
+
+| stage | phone, 60 images | drone, 40 images |
+|---|---|---|
+| unpack / prepare_images | 1 | 0.5 |
+| features (COLMAP SIFT, GPU) | 2.5 | 1.5 |
+| matching (GPU; exhaustive / sequential) | 13 | 6.5 |
+| known-pose model + triangulate / mapper | 10 | 79 |
+| bundle adjust / georeference | 2.5 | 2 |
+| undistort + InterfaceCOLMAP | 2 | 2 |
+| densify (OpenMVS, CPU, level 1 / level 2) | 320 | 212 |
+| ReconstructMesh | 38 | 38 |
+| RefineMesh | 87 | 59 |
+| TextureMesh | 13 | 5 |
+| collect + measure / cloud clean + ortho | 3 | 12 |
+| total | 491 s (8.2 min) | 418 s (7.0 min) |
+
+### Known problems found by these runs
+
+- OpenMVS 2.4.0 CUDA depth-map estimation fails on this PC for every option set tried (`CUDA error at
+  UtilCUDADevice.h:54: named symbol not found (code 500)`, GPU initialises fine; `CUDA_FORCE_PTX_JIT`, eager module
+  loading, `--cuda-device 0` change nothing). The drivers catch it and rerun DensifyPointCloud on the CPU with
+  `--cuda-device -2` ONE `--resolution-level` coarser (phone level 1 = 640 x 480 working images, drone level 2); the
+  result notes say so. At level 0 on the CPU the phone job's densify took 23 min instead of 5 min and gave sides
+  200.5 / 200.3 / 199.8 mm. A working CUDA build of OpenMVS (or another version) would cut densify to about a minute.
+  COLMAP itself runs SIFT extraction and matching on the GPU.
+- RefineMesh at `--resolution-level 0` on the 1.8 M-face phone mesh ended without output; level 1 works and also
+  decimates the mesh, which makes TextureMesh 20 x faster, so the drivers use it.
+
+Run-to-run spread (second full run, same images; COLMAP mapper and OpenMVS are not bit-reproducible): phone sides
+201.66 to 201.72 mm (jitter 201.85 to 202.28 mm), volume +1.5 % / +1.7 %; drone house 9.973 / 5.952 / 4.016 m, scale
+-0.23 %; noisy GPS scale -0.46 %, tilt 0.73 deg. Wall time of that run: phone 547 s, phone jitter 605 s, drone 560 s,
+drone noisy 566 s (about 10 % slower than the first run, same PC with other load).

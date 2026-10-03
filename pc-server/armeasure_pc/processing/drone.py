@@ -18,7 +18,8 @@ import numpy as np
 from .common import Ctx, JobError, read_manifest, safe_extract, versions
 from .dronemeta import build_table, has_gps, time_ordered, write_table
 from .geo import (camera_from_meta, convex_hull_area, fit_ground_plane, geodetic_to_enu, gsd_cm_per_px)
-from .photogrammetry import (collect_outputs, detect_tools, missing_tools_message, pick_flag, run_cmd)
+from .photogrammetry import (collect_outputs, detect_tools, missing_tools_message, pick_flag, run_cmd,
+                             openmvs_chain)
 
 # quality -> (max image side px or None for full resolution, DensifyPointCloud --resolution-level)
 QUALITY = {"QUICK": (1600, 2), "FINE": (2400, 1), "DETAILED": (None, 0)}
@@ -320,7 +321,8 @@ def run(upload_zip: Path, outdir: Path, ctx: Ctx) -> dict:
     # ---- georeference: ENU positions, robust 3 m alignment
     ctx.progress(0.45, "georeference")
     ref_file = ws / "ref_enu.txt"
-    ref_file.write_text("".join(f"{n} {p[0]!r} {p[1]!r} {p[2]!r}\n" for n, p in refs.items()))
+    ref_file.write_text("".join(f"{n} {float(p[0])!r} {float(p[1])!r} {float(p[2])!r}\n"
+                                for n, p in refs.items()))     # float(): numpy 2 repr is 'np.float64(..)'
     aligned = ws / "aligned"
     aligned.mkdir(exist_ok=True)
     args = [colmap, "model_aligner", "--input_path", best, "--output_path", aligned,
@@ -358,24 +360,7 @@ def run(upload_zip: Path, outdir: Path, ctx: Ctx) -> dict:
     if max_side:
         args += ["--max_image_size", str(max_side)]
     run_cmd(args, ctx, log)
-    d = str(dense)
-    ctx.progress(0.55, "openmvs_interface")
-    run_cmd([tools["InterfaceCOLMAP"], "-i", d, "-o", "scene.mvs", "-w", d], ctx, log, cwd=dense)
-    ctx.progress(0.6, "densify")
-    run_cmd([tools["DensifyPointCloud"], "scene.mvs", "-o", "scene_dense.mvs", "-w", d,
-             "--resolution-level", str(level)], ctx, log, cwd=dense)
-    ctx.progress(0.75, "reconstruct_mesh")
-    run_cmd([tools["ReconstructMesh"], "scene_dense.mvs", "-o", "scene_mesh.mvs", "-w", d], ctx, log, cwd=dense)
-    ctx.progress(0.82, "refine_mesh")
-    tex_in = "scene_mesh.mvs"
-    try:
-        run_cmd([tools["RefineMesh"], "scene_mesh.mvs", "-o", "scene_refine.mvs", "-w", d], ctx, log, cwd=dense)
-        tex_in = "scene_refine.mvs"
-    except JobError:
-        notes.append("RefineMesh failed; unrefined mesh textured")
-    ctx.progress(0.9, "texture")
-    run_cmd([tools["TextureMesh"], tex_in, "-o", "scene_texture.mvs", "--export-type", "obj", "-w", d],
-            ctx, log, cwd=dense)
+    openmvs_chain(tools, dense, level, ctx, log, notes)
 
     # ---- outputs
     ctx.progress(0.95, "collect")

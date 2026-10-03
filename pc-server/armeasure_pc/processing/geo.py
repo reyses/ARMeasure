@@ -134,7 +134,7 @@ def fit_ground_plane(pts: np.ndarray, tol: float = 0.25, iters: int = 400, seed:
     n, d = best                       # least-squares refinement on the inliers
     inl = low[np.abs(low @ n + d) < tol]
     c = inl.mean(axis=0)
-    n2 = np.linalg.svd(inl - c)[2][-1]
+    n2 = np.linalg.svd(inl - c, full_matrices=False)[2][-1]
     if n2[2] < 0:
         n2 = -n2
     return n2, -float(n2 @ c)

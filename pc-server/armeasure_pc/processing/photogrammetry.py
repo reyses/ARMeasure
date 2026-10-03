@@ -71,8 +71,44 @@ def run_cmd(args: list, ctx: Ctx, log: Path, cwd: Path | None = None) -> None:
             ctx.register_proc(None)
     if p.returncode != 0:
         tail = log.read_bytes()[-1500:].decode("utf-8", "replace")
+        mvs = _openmvs_log_tail(args, cwd)      # OpenMVS prints to its own <Exe>-<stamp>.log, not to stdout
+        if mvs:
+            tail += "\nOpenMVS log tail: " + mvs
+            with open(log, "ab") as lf:
+                lf.write(("\n" + mvs + "\n").encode())
         raise JobError(f"{Path(str(args[0])).stem} {args[1] if len(args) > 1 else ''} failed "
                        f"(exit {p.returncode}). Log tail: {tail}")
+
+
+_mvs_cpu_only = False     # set once a CUDA error shows the OpenMVS GPU kernels do not run on this machine
+
+
+def run_openmvs(args: list, ctx: Ctx, log: Path, cwd: Path, notes: list | None = None,
+                cpu_args: list | None = None) -> None:
+    """Run an OpenMVS tool that accepts --cuda-device: GPU first; on a CUDA runtime error (the 2.4.0 CUDA build
+    prints 'CUDA error ... named symbol not found (code 500)' on the RTX 3060) repeat on the CPU (-2), with
+    `cpu_args` instead of `args` when given (e.g. a coarser --resolution-level, the CPU being ~20x slower)."""
+    global _mvs_cpu_only
+    if not _mvs_cpu_only:
+        try:
+            return run_cmd(args, ctx, log, cwd=cwd)
+        except JobError as e:
+            if "CUDA error" not in str(e):
+                raise
+            _mvs_cpu_only = True
+    if notes is not None and not any("CUDA kernels failed" in n for n in notes):
+        notes.append("OpenMVS CUDA kernels failed on this GPU/driver (CUDA error 500): OpenMVS ran on the CPU")
+    run_cmd([*(cpu_args or args), "--cuda-device", "-2"], ctx, log, cwd=cwd)
+
+
+def _openmvs_log_tail(args: list, cwd: Path | None, n: int = 1200) -> str:
+    stem = Path(str(args[0])).stem
+    if cwd is None or not stem[:1].isupper():
+        return ""
+    logs = sorted(Path(cwd).glob(f"{stem}-*.log"), key=lambda p: p.stat().st_mtime)
+    return logs[-1].read_text(errors="replace").split("MEMORYINFO")[0][-n:] if logs else ""
+    logs = sorted(Path(cwd).glob(f"{stem}-*.log"), key=lambda p: p.stat().st_mtime)
+    return logs[-1].read_text(errors="replace").split("MEMORYINFO")[0][-n:] if logs else ""
 
 
 _help_cache: dict = {}
@@ -189,6 +225,51 @@ def write_text_model(model_dir: Path, db: Path, poses: list[dict]) -> int:
 
 
 # ---------------------------------------------------------------- pipeline
+def sparse_stats(text: str) -> dict:
+    """Registered images / points / mean reprojection error (px) from `colmap model_analyzer` output."""
+    import re
+    out = {}
+    for key, pat in (("registered_images", r"Registered images: (\d+)"), ("points", r"Points: (\d+)"),
+                     ("mean_reprojection_error_px", r"Mean reprojection error: ([0-9.]+)px")):
+        m = re.findall(pat, text)
+        if m:
+            out[key] = float(m[-1]) if "." in m[-1] else int(m[-1])
+    return out
+
+
+def openmvs_chain(tools: dict, dense: Path, level: int, ctx: Ctx, log: Path, notes: list) -> None:
+    """COLMAP undistorted workspace -> scene_texture.obj. Files: scene.mvs, scene_dense.mvs/.ply, scene_mesh.ply,
+    scene_refine.ply, scene_texture.obj/.mtl/_material_00_map_Kd.jpg. (ReconstructMesh/RefineMesh write PLY only when
+    the project is in interface format, so every later stage takes the mesh with -m and the cameras from the .mvs.)
+    On the CPU fallback the depth-maps run one --resolution-level coarser: CPU patch-match is ~20x slower."""
+    d = str(dense)
+    ctx.progress(0.55, "openmvs_interface")
+    run_cmd([tools["InterfaceCOLMAP"], "-i", d, "-o", "scene.mvs", "-w", d], ctx, log, cwd=dense)
+    ctx.progress(0.6, "densify")
+    dens = [tools["DensifyPointCloud"], "scene.mvs", "-o", "scene_dense.mvs", "-w", d]
+    run_openmvs([*dens, "--resolution-level", str(level)], ctx, log, dense, notes,
+                cpu_args=[*dens, "--resolution-level", str(level + 1)])
+    if _mvs_cpu_only:
+        notes.append(f"OpenMVS densify on the CPU at resolution level {level + 1} (GPU path unavailable)")
+    ctx.progress(0.75, "reconstruct_mesh")
+    run_openmvs([tools["ReconstructMesh"], "scene_dense.mvs", "-o", "scene_mesh.mvs", "-w", d],
+                ctx, log, dense, notes)
+    ctx.progress(0.82, "refine_mesh")
+    mesh = "scene_mesh.ply"
+    try:
+        run_cmd([tools["RefineMesh"], "scene_dense.mvs", "-m", mesh, "-o", "scene_refine.mvs", "--export-type",
+                 "ply", "--resolution-level", str(max(level, 1)), "-w", d], ctx, log, cwd=dense)
+        if (dense / "scene_refine.ply").exists():
+            mesh = "scene_refine.ply"
+        else:
+            notes.append("RefineMesh produced no mesh; unrefined mesh textured")
+    except JobError:
+        notes.append("RefineMesh failed; unrefined mesh textured")    # refinement is optional
+    ctx.progress(0.9, "texture")
+    run_openmvs([tools["TextureMesh"], "scene_dense.mvs", "-m", mesh, "-o", "scene_texture.mvs", "--export-type",
+                 "obj", "-w", d], ctx, log, dense, notes)
+
+
 def run(upload_zip: Path, outdir: Path, ctx: Ctx) -> dict:
     t0 = time.time()
     tools = detect_tools()
@@ -259,39 +340,26 @@ def run(upload_zip: Path, outdir: Path, ctx: Ctx) -> dict:
             args += [fl, val]
     run_cmd(args, ctx, log)
 
+    mark = log.stat().st_size
+    run_cmd([colmap, "model_analyzer", "--path", ba], ctx, log)
+    sparse = sparse_stats(log.read_bytes()[mark:].decode("utf-8", "replace"))
+
     ctx.progress(0.5, "undistort")
     dense = ws / "dense"
     run_cmd([colmap, "image_undistorter", "--image_path", image_dir, "--input_path", ba,
              "--output_path", dense, "--output_type", "COLMAP", "--max_image_size", "2400"], ctx, log)
 
-    ctx.progress(0.55, "openmvs_interface")
-    d = str(dense)
-    run_cmd([tools["InterfaceCOLMAP"], "-i", d, "-o", "scene.mvs", "-w", d], ctx, log, cwd=dense)
-    ctx.progress(0.6, "densify")
-    run_cmd([tools["DensifyPointCloud"], "scene.mvs", "-o", "scene_dense.mvs", "-w", d,
-             "--resolution-level", "0"], ctx, log, cwd=dense)
-    ctx.progress(0.75, "reconstruct_mesh")
-    run_cmd([tools["ReconstructMesh"], "scene_dense.mvs", "-o", "scene_mesh.mvs", "-w", d], ctx, log, cwd=dense)
-    ctx.progress(0.82, "refine_mesh")
-    tex_in = "scene_mesh.mvs"
-    try:
-        run_cmd([tools["RefineMesh"], "scene_mesh.mvs", "-o", "scene_refine.mvs", "-w", d], ctx, log, cwd=dense)
-        tex_in = "scene_refine.mvs"
-    except JobError:
-        pass  # refinement is optional; texture the unrefined mesh
-    ctx.progress(0.9, "texture")
-    run_cmd([tools["TextureMesh"], tex_in, "-o", "scene_texture.mvs", "--export-type", "obj", "-w", d],
-            ctx, log, cwd=dense)
+    notes = [f"{n_img} images, {'one shared camera' if same else 'one camera per image'}"]
+    openmvs_chain(tools, dense, 0, ctx, log, notes)
 
     ctx.progress(0.96, "collect")
     outdir.mkdir(parents=True, exist_ok=True)
-    mesh = collect_outputs(dense, outdir)
+    collect_outputs(dense, outdir)
     from .objmesh import to_protocol
     measures = to_protocol(measure_obj(outdir / "mesh.obj", manifest))
     return {"measures": measures,
-            "stats": {"backend": "pc", "duration_ms": int((time.time() - t0) * 1000),
-                      "versions": {**versions(), "colmap": str(colmap)},
-                      "notes": [f"{n_img} images, {'one shared camera' if same else 'one camera per image'}"]}}
+            "stats": {"backend": "pc", "duration_ms": int((time.time() - t0) * 1000), "images": n_img,
+                      "sparse": sparse, "versions": {**versions(), "colmap": str(colmap)}, "notes": notes}}
 
 
 def collect_outputs(dense: Path, outdir: Path) -> Path:
@@ -311,22 +379,79 @@ def collect_outputs(dense: Path, outdir: Path) -> Path:
     return obj
 
 
+SUPPORT_SEARCH_M = 0.03     # vertices this close to the phone's support plane are used to find the real floor
+MIN_MARGIN_M = 0.003
+OBJ_BOX_PAD_M = 0.02
+
+
+def refine_support_plane(pts: np.ndarray, n: np.ndarray, d: float, tol: float = 0.002, iters: int = 300,
+                         seed: int = 0) -> tuple[np.ndarray, float, float | None]:
+    """The phone's support plane (ARCore plane estimate) is only good to about a centimetre, but the mesh floor sits
+    exactly where the photos put it. Fit the dominant plane (RANSAC, normal within 15 deg of n) to the vertices within
+    3 cm of the given plane. Returns (n, d, residual std m) of the fitted floor, or the input plane and None."""
+    cand = pts[np.abs(pts @ n + d) < SUPPORT_SEARCH_M]
+    if len(cand) < 200:
+        return n, d, None
+    rng = np.random.default_rng(seed)
+    if len(cand) > 50000:
+        cand = cand[rng.choice(len(cand), 50000, replace=False)]
+    best, best_cnt = None, 0
+    for _ in range(iters):
+        s = cand[rng.choice(len(cand), 3, replace=False)]
+        nn = np.cross(s[1] - s[0], s[2] - s[0])
+        k = np.linalg.norm(nn)
+        if k < 1e-12:
+            continue
+        nn /= k
+        if abs(nn @ n) < np.cos(np.radians(15)):
+            continue
+        nn = nn if nn @ n > 0 else -nn
+        dd = -float(nn @ s[0])
+        cnt = int((np.abs(cand @ nn + dd) < tol).sum())
+        if cnt > best_cnt:
+            best, best_cnt = (nn, dd), cnt
+    if best is None or best_cnt < 100:
+        return n, d, None
+    nn, dd = best
+    inl = cand[np.abs(cand @ nn + dd) < tol]
+    c = inl.mean(axis=0)
+    n2 = np.linalg.svd(inl - c, full_matrices=False)[2][-1]
+    n2 = n2 if n2 @ n > 0 else -n2
+    d2 = -float(n2 @ c)
+    return n2, d2, float(np.std(inl @ n2 + d2))
+
+
 def measure_obj(obj: Path, manifest: dict) -> dict:
+    """Dimensions and volume of the object in the textured mesh (which also contains the floor it stands on):
+    crop to the manifest box, find the real floor plane in the mesh, drop everything within a margin of it, keep the
+    largest connected piece, close the unseen bottom by projecting its lowest layer onto the floor, then measure."""
     import open3d as o3d
     from .objmesh import _largest_component, box_mask, measure
     mesh = o3d.io.read_triangle_mesh(str(obj))
     if len(mesh.vertices) < 10:
         raise JobError("textured mesh is empty")
+    mesh.remove_duplicated_vertices()      # the OBJ repeats vertices along UV seams: re-join the surface pieces
     box = manifest.get("box")
     if box:
-        mesh.remove_vertices_by_mask(~box_mask(np.asarray(mesh.vertices), box, pad=0.01))
-    mesh = _largest_component(mesh)
+        mesh.remove_vertices_by_mask(~box_mask(np.asarray(mesh.vertices), box, pad=OBJ_BOX_PAD_M))
     pts = np.asarray(mesh.vertices)
+    if len(pts) < 10:
+        raise JobError("no mesh vertices inside the manifest box")
     n, dd = np.array([0.0, 1.0, 0.0]), -float(pts[:, 1].min())
     sp = manifest.get("support_plane")
     if sp:
         k = np.linalg.norm(sp["normal"])
         n, dd = np.asarray(sp["normal"], float) / k, float(sp["d"]) / k
-        if pts.mean(axis=0) @ n + dd < 0:
-            n, dd = -n, -dd
-    return measure(mesh, pts, n, dd, voxel=0.0)
+    ref = np.asarray(box["center"], float) if box else pts.mean(axis=0)
+    if ref @ n + dd < 0:
+        n, dd = -n, -dd
+    n, dd, resid = refine_support_plane(pts, n, dd)
+    margin = max(MIN_MARGIN_M, 4 * resid) if resid is not None else 0.008
+    mesh.remove_vertices_by_mask(pts @ n + dd <= margin)
+    mesh = _largest_component(mesh)
+    P = np.asarray(mesh.vertices)
+    if len(P) < 100:
+        raise JobError("almost nothing is left above the floor plane of the mesh")
+    low = P[P @ n + dd < margin + 0.006]
+    foot = low - np.outer(low @ n + dd, n)
+    return measure(mesh, np.vstack([P, foot]), n, dd, voxel=0.0)

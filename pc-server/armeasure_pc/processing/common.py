@@ -25,7 +25,7 @@ class Ctx:
     """Handed to processors: progress reporting + cooperative cancellation."""
 
     def __init__(self, workdir: Path, update=None, is_cancelled=None, register_proc=None):
-        self.workdir = workdir
+        self.workdir = Path(workdir).resolve()     # absolute: external tools run with another cwd
         self._update = update or (lambda *a, **k: None)
         self._is_cancelled = is_cancelled or (lambda: False)
         self.register_proc = register_proc or (lambda p: None)
