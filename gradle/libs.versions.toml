@@ -8,10 +8,9 @@ espressoCore = "3.7.0"
 appcompat = "1.8.0"
 material = "1.14.0"
 activity = "1.13.0"
-constraintlayout = "2.2.2"
 lifecycle = "2.11.0"
 arcore = "1.56.0"
-sceneview = "2.3.0"
+sceneview = "4.52.0"
 composeBom = "2026.09.00"
 coroutines = "1.11.0"
 
@@ -23,7 +22,6 @@ androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-co
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 androidx-activity-ktx = { group = "androidx.activity", name = "activity-ktx", version.ref = "activity" }
-androidx-constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
 arcore = { group = "com.google.ar", name = "core", version.ref = "arcore" }
 sceneview-ar = { group = "io.github.sceneview", name = "arsceneview", version.ref = "sceneview" }

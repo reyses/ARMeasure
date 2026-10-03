@@ -3,32 +3,33 @@ package com.example.arruler
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
-import com.google.ar.core.PlaybackStatus
-import com.example.arruler.ar.RecordingFiles
-import com.example.arruler.ar.RecordingState
-import com.example.arruler.ar.TrackEvent
-import com.example.arruler.ui.PlaybackBadge
-import com.example.arruler.ui.RecordControl
 import android.view.HapticFeedbackConstants
+import android.widget.Toast
+import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.arruler.ar.ArRenderer
+import com.example.arruler.ar.ArSceneHost
 import com.example.arruler.ar.ArSessionController
-import com.example.arruler.databinding.ActivityMainBinding
+import com.example.arruler.ar.RecordingFiles
+import com.example.arruler.ar.TrackEvent
 import com.example.arruler.measure.MeasureMode
 import com.example.arruler.measure.MeasureState
 import com.example.arruler.measure.MeasurementSession
@@ -36,16 +37,21 @@ import com.example.arruler.measure.Phase
 import com.example.arruler.ui.AreaControls
 import com.example.arruler.ui.ControlsBar
 import com.example.arruler.ui.MeasureOverlay
+import com.example.arruler.ui.PlaybackBadge
+import com.example.arruler.ui.RecordControl
+import com.google.ar.core.PlaybackStatus
 import kotlinx.coroutines.launch
 
 /** Thin wiring: AR session + measurement state + renderer + Compose UI. */
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var binding: ActivityMainBinding
     private lateinit var ar: ArSessionController
-    private lateinit var renderer: ArRenderer
+    private val renderer = ArRenderer()
     private val session = MeasurementSession()
     private var pointCount = 0
+
+    /** Bound to the composition's view while it exists (see [setContent] below). */
+    private var haptic: () -> Unit = {}
 
     private val pickPlayback = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) launchPlayback(uri)
@@ -54,11 +60,8 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
 
-        ar = ArSessionController(binding.arSceneView)
-        renderer = ArRenderer(binding.arSceneView)
+        ar = ArSessionController(this)
         ar.onFrame = ::onArFrame
         ar.onTap = ::onArTap
         handlePlaybackIntent(intent)
@@ -82,27 +85,35 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        binding.composeView.setContent {
+        setContent {
             val state by session.state.collectAsState()
             val hasSurface by ar.hasSurface.collectAsState()
             val recState by ar.recorder.state.collectAsState()
             val playback by ar.playbackStatus.collectAsState()
+            val view = LocalView.current
+            DisposableEffect(view) {
+                haptic = { view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK) }
+                onDispose { haptic = {} }
+            }
             MaterialTheme {
-                Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars)) {
-                    MeasureOverlay(state, hasSurface)
-                    RecordControl(
-                        state = recState,
-                        onToggle = ar.recorder::toggle,
-                        onPlayback = ::pickPlaybackFile,
-                    )
-                    if (playback != PlaybackStatus.NONE) PlaybackBadge(playback == PlaybackStatus.FINISHED)
-                    ControlsBar(
-                        state = state,
-                        onToggleUnit = session::nextUnit,
-                        onMainButton = ::onMainButton,
-                        onClear = ::clearAll,
-                    )
-                    AreaControls(state, ::onSetMode, ::onAreaClose, ::onAreaUndo, ::onAreaHeight)
+                Box(Modifier.fillMaxSize().background(Color.Black)) {
+                    ArSceneHost(ar, renderer, Modifier.fillMaxSize())
+                    Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars)) {
+                        MeasureOverlay(state, hasSurface)
+                        RecordControl(
+                            state = recState,
+                            onToggle = ar.recorder::toggle,
+                            onPlayback = ::pickPlaybackFile,
+                        )
+                        if (playback != PlaybackStatus.NONE) PlaybackBadge(playback == PlaybackStatus.FINISHED)
+                        ControlsBar(
+                            state = state,
+                            onToggleUnit = session::nextUnit,
+                            onMainButton = ::onMainButton,
+                            onClear = ::clearAll,
+                        )
+                        AreaControls(state, ::onSetMode, ::onAreaClose, ::onAreaUndo, ::onAreaHeight)
+                    }
                 }
             }
         }
@@ -197,10 +208,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun onAreaHeight() = session.startHeight()
 
-    private fun haptic() {
-        binding.root.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
-    }
-
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -216,7 +223,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun pickPlaybackFile() = pickPlayback.launch(arrayOf("video/mp4"))
 
+    /** The playback session is a new world frame, so the measurement and its anchors are dropped first. */
     private fun launchPlayback(uri: Uri) {
+        clearAll()
         if (!ar.startPlayback(uri)) toast("Could not open recording")
     }
 
