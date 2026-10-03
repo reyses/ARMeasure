@@ -23,6 +23,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -58,6 +59,10 @@ import com.example.arruler.store.PlanFrame
 import com.example.arruler.store.Project
 import com.example.arruler.store.ProjectRepository
 import com.example.arruler.store.RoomCapture
+import com.example.arruler.scan3d.Scan3DViewer
+import com.example.arruler.scan3d.ScanFiles
+import com.example.arruler.scan3d.ScanSnapshot
+import com.example.arruler.scan3d.scansRoot
 import com.example.arruler.ui.AreaControls
 import com.example.arruler.ui.ArRulerTheme
 import com.example.arruler.ui.ControlsBar
@@ -76,7 +81,9 @@ import com.example.arruler.ui.SaveRoomDraft
 import com.example.arruler.ui.SaveRoomPill
 import com.example.arruler.ui.SaveRoomSheet
 import com.google.ar.core.PlaybackStatus
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 
@@ -102,6 +109,13 @@ class MainActivity : AppCompatActivity() {
     private var screen by mutableStateOf<Screen>(Screen.Measure)
     private var saveDraft by mutableStateOf<SaveRoomDraft?>(null)
     private var lastUsedProjectId by mutableStateOf<String?>(null)
+
+    // ---- 3D scan viewer ----
+    private var scan3dSnapshot by mutableStateOf<ScanSnapshot?>(null)
+    private var scanListVersion by mutableStateOf(0) // bump after save / delete to refresh scan lists
+
+    /** Where Back from the 3D viewer goes: Measure for a fresh scan, the Plan for one opened from its list. */
+    private var scan3dReturnTo by mutableStateOf<Screen>(Screen.Measure)
 
     /** Outline + height point of the room last saved, so the Save pill hides until the measurement changes. */
     private var savedFor by mutableStateOf<Pair<List<MeasurePoint>, MeasurePoint?>?>(null)
@@ -180,8 +194,10 @@ class MainActivity : AppCompatActivity() {
             ArRulerTheme {
                 Box(Modifier.fillMaxSize().background(Color.Black)) {
                     // The AR view stays composed under the other screens so the ARCore session,
-                    // anchors and the shared plan frame survive a visit to Projects/Plan.
-                    ArSceneHost(ar, renderer, Modifier.fillMaxSize())
+                    // anchors and the shared plan frame survive a visit to Projects/Plan. Under the 3D
+                    // viewer it is held paused (same composition, session paused, no drawing) so the two
+                    // GL surfaces never render together and the anchors still survive.
+                    ArSceneHost(ar, renderer, Modifier.fillMaxSize(), paused = screen is Screen.Scan3D)
                     if (screen == Screen.Measure && showDepth) DepthConfidenceOverlay(depthHeat)
                     if (screen == Screen.Measure) {
                         Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars)) {
@@ -215,6 +231,7 @@ class MainActivity : AppCompatActivity() {
                                     onStartPause = ::onScanStartPause,
                                     onReset = ::onScanReset,
                                     onAnalyze = ::onScanAnalyze,
+                                    onView3D = ::onScanView3D,
                                     onSave = ::onSaveScanRoom,
                                 )
                                 else -> {}
@@ -242,6 +259,9 @@ class MainActivity : AppCompatActivity() {
                         }
                         is Screen.Plan -> Surface(Modifier.fillMaxSize()) {
                             val project = projects.firstOrNull { it.id == s.projectId }
+                            val scans = remember(s.projectId, scanListVersion) {
+                                ScanFiles.list(scansRoot(this@MainActivity), s.projectId)
+                            }
                             PlanScreen(
                                 project = project,
                                 units = state.unit,
@@ -251,7 +271,19 @@ class MainActivity : AppCompatActivity() {
                                 onExport = { format, angles ->
                                     project?.let { exportPlan(it, format, state.unit, angles) }
                                 },
+                                scans = scans,
+                                onOpenScan = { id -> scan3dSnapshot = null; scan3dReturnTo = s; screen = Screen.Scan3D(id) },
+                                onDeleteScan = { id -> ScanFiles.delete(scansRoot(this@MainActivity), id); scanListVersion++ },
                             )
+                        }
+                        is Screen.Scan3D -> Surface(Modifier.fillMaxSize()) {
+                            val snap = scan3dSnapshot?.takeIf { it.id == s.scanId }
+                                ?: remember(s.scanId) { ScanFiles.load(scansRoot(this@MainActivity), s.scanId) }
+                            if (snap == null) {
+                                LaunchedEffect(Unit) { toast("Scan not found"); screen = scan3dReturnTo }
+                            } else {
+                                Scan3DViewer(snap, onBack = { screen = scan3dReturnTo })
+                            }
                         }
                     }
                     saveDraft?.let { draft ->
@@ -266,7 +298,11 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 BackHandler(enabled = screen != Screen.Measure) {
-                    screen = if (screen is Screen.Plan) Screen.Projects else Screen.Measure
+                    screen = when (screen) {
+                        is Screen.Plan -> Screen.Projects
+                        is Screen.Scan3D -> scan3dReturnTo
+                        else -> Screen.Measure
+                    }
                 }
             }
         }
@@ -410,6 +446,37 @@ class MainActivity : AppCompatActivity() {
     private fun onScanAnalyze() {
         scanSaved = false
         scan.analyze()
+    }
+
+    /**
+     * Saves the scan (cloud + planes + room) into the current / last-used project, creating "My place"
+     * when there is none, and opens the 3D viewer. The cloud and the AR session stay intact for Back.
+     */
+    private fun onScanView3D() {
+        scan.pause()
+        lifecycleScope.launch {
+            val id = java.util.UUID.randomUUID().toString()
+            val projectId = scanProjectId()
+            val snap = scan.snapshot(id, projectId) ?: return@launch toast("Nothing scanned yet")
+            withContext(Dispatchers.IO) { runCatching { ScanFiles.save(scansRoot(this@MainActivity), snap) } }
+                .onFailure { toast("Could not save the scan: ${it.message}") }
+            scan3dSnapshot = snap
+            scan3dReturnTo = Screen.Measure
+            scanListVersion++
+            screen = Screen.Scan3D(id)
+        }
+    }
+
+    /** The project a new scan belongs to: the last-used one if it still exists, else a new "My place". */
+    private fun scanProjectId(): String? = try {
+        lastUsedProjectId?.takeIf { repo.project(it) != null }
+            ?: repo.createProject("My place").id.also {
+                lastUsedProjectId = it
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_LAST_PROJECT, it).apply()
+            }
+    } catch (e: IOException) {
+        toast("Storage error: ${e.message}")
+        null
     }
 
     /** Lifts the scanned floor polygon back to 3D at floorY and reuses the AREA save path. */

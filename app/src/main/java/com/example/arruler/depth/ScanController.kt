@@ -2,6 +2,7 @@ package com.example.arruler.depth
 
 import com.example.arruler.geometry.Vec3
 import com.example.arruler.measure.MeasurePoint
+import com.example.arruler.scan3d.ScanSnapshot
 import com.google.ar.core.Frame
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -11,6 +12,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /** Live counters of the scan: occupied voxels and depth points inserted so far. */
 data class ScanStats(val voxels: Int = 0, val points: Long = 0)
@@ -166,6 +168,19 @@ class ScanController(private val scope: CoroutineScope) {
             }
         }
     }
+
+    /**
+     * Cloud + planes + room as an immutable snapshot (off the main thread); null when the cloud is empty.
+     * Costs one plane extraction and holds the cloud lock meanwhile, so call it while paused/analysed.
+     */
+    suspend fun snapshot(id: String, projectId: String?): ScanSnapshot? =
+        withContext(Dispatchers.Default) {
+            lock.withLock {
+                if (cloud.count == 0) return@withLock null
+                val planes = PlaneExtractor().extract(cloud.points(ScanLogic.ANALYZE_MIN_HITS))
+                ScanSnapshot.from(cloud, planes, RoomFromPlanes.build(planes), id, projectId)
+            }
+        }
 
     /** Runs plane extraction + room reconstruction off the main thread; result in [analysis]. */
     fun analyze() {

@@ -2,9 +2,9 @@ package com.example.arruler.scan3d
 
 import com.example.arruler.depth.PlaneKind
 import com.example.arruler.depth.VoxelCloud
+import com.example.arruler.geometry.ColorRamp
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -35,18 +35,16 @@ class ScanFilesTest {
     }
 
     @Test fun rampEnds() {
-        assertEquals(0xFF0000, QualityRamp.rgb(0f))
-        assertEquals(0x00FF00, QualityRamp.rgb(1f))
-        assertEquals(0xFFFF00, QualityRamp.rgb(0.5f))
+        assertEquals(0xFF0000, ColorRamp.rgb(0f))
+        assertEquals(0x00FF00, ColorRamp.rgb(1f))
+        assertEquals(0xFFFF00, ColorRamp.rgb(0.5f))
     }
 
     @Test fun roundTrip() {
         val s = snapshot()
         val root = tmp.newFolder("scans")
         ScanFiles.save(root, s)
-        val l = ScanFiles.load(root, "s1")
-        assertNotNull(l)
-        l!!
+        val l = ScanFiles.load(root, "s1") ?: error("scan s1 was not saved")
         assertEquals(s.id, l.id); assertEquals(s.projectId, l.projectId); assertEquals(s.createdAt, l.createdAt)
         assertArrayEquals(s.points, l.points, 0f)
         assertArrayEquals(s.quality, l.quality, 0f)
@@ -57,8 +55,10 @@ class ScanFilesTest {
             assertEquals(s.planes[i].d, l.planes[i].d, 0f)
             assertEquals(s.planes[i].inlierCount, l.planes[i].inlierCount)
         }
-        assertArrayEquals(s.room!!.outlineXZ, l.room!!.outlineXZ, 0f)
-        assertEquals(4f, l.room!!.areaM2, 1e-5f)
+        val sr = s.room ?: error("fixture has a room")
+        val lr = l.room ?: error("loaded scan lost its room")
+        assertArrayEquals(sr.outlineXZ, lr.outlineXZ, 0f)
+        assertEquals(4f, lr.areaM2, 1e-5f)
         val info = ScanFiles.list(root, "p1").single()
         assertEquals(3, info.pointCount)
         assertEquals(4f, info.roomAreaM2!!, 1e-5f)

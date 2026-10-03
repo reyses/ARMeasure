@@ -33,6 +33,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.arruler.depth.PlaneKind
+import com.example.arruler.geometry.ColorRamp
 import com.google.android.filament.Box as FilamentBox
 import com.google.android.filament.Engine
 import com.google.android.filament.MaterialInstance
@@ -71,7 +72,7 @@ internal object ViewerGroups {
         if (mode == ColourMode.QUALITY) {
             for (i in src) {
                 val b = (s.quality[i] * QUALITY_BUCKETS).toInt().coerceIn(0, QUALITY_BUCKETS - 1)
-                buckets.getOrPut(QualityRamp.rgb((b + 0.5f) / QUALITY_BUCKETS)) { ArrayList() }.add(i)
+                buckets.getOrPut(ColorRamp.rgb((b + 0.5f) / QUALITY_BUCKETS)) { ArrayList() }.add(i)
             }
         } else {
             val planeOf = s.planeIndexPerPoint()

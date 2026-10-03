@@ -5,4 +5,5 @@ sealed interface Screen {
     data object Measure : Screen
     data object Projects : Screen
     data class Plan(val projectId: String) : Screen
+    data class Scan3D(val scanId: String) : Screen
 }

@@ -1,6 +1,7 @@
 package com.example.arruler.scan3d
 
 import com.example.arruler.depth.PlaneKind
+import com.example.arruler.geometry.ColorRamp
 import com.example.arruler.store.writeAtomic
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -132,7 +133,7 @@ object ScanFiles {
         for (i in 0 until s.pointCount) {
             buf.putFloat(s.points[i * 3]).putFloat(s.points[i * 3 + 1]).putFloat(s.points[i * 3 + 2])
             val q = s.quality[i]
-            buf.put(QualityRamp.r(q).toByte()).put(QualityRamp.g(q).toByte()).put(0.toByte())
+            buf.put(ColorRamp.r(q).toByte()).put(ColorRamp.g(q).toByte()).put(0.toByte())
             buf.putFloat(q)
         }
         return buf.array()

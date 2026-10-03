@@ -21,9 +21,14 @@ fun ArSceneHost(
     controller: ArSessionController,
     renderer: ArRenderer,
     modifier: Modifier = Modifier,
+    paused: Boolean = false,
 ) {
+    // While [paused] the view's lifecycle is held at CREATED: ARCore pauses and Filament stops drawing
+    // (so a second GL surface can sit on top) but the view stays composed and the anchors survive.
+    val lifecycle = rememberGatedLifecycle(paused)
     key(controller.request) {
         ARSceneView(
+            lifecycle = lifecycle,
             modifier = modifier.onSizeChanged { controller.onViewSize(it.width, it.height) },
             playbackDatasetUri = controller.request.uri,
             sessionCameraConfig = null,

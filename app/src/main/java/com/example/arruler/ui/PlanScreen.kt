@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
@@ -17,6 +19,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -36,6 +39,8 @@ import com.example.arruler.R
 import com.example.arruler.measure.Units
 import com.example.arruler.plan.ExportFormat
 import com.example.arruler.plan.FloorPlanCanvas
+import com.example.arruler.scan3d.ScanInfo
+import com.example.arruler.scan3d.ScanListSection
 import com.example.arruler.store.Project
 import com.example.arruler.store.toFloorPlan
 
@@ -52,6 +57,9 @@ fun PlanScreen(
     onRenameRoom: (roomId: String, name: String) -> Unit,
     onDeleteRoom: (roomId: String) -> Unit,
     onExport: (ExportFormat, showAngles: Boolean) -> Unit,
+    scans: List<ScanInfo> = emptyList(),
+    onOpenScan: (String) -> Unit = {},
+    onDeleteScan: (String) -> Unit = {},
 ) {
     if (project == null) {
         LaunchedEffect(Unit) { onBack() }
@@ -62,6 +70,9 @@ fun PlanScreen(
     var shareMenu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
+    var showScans by remember { mutableStateOf(false) }
+    // The sheet closes itself once the last scan is deleted.
+    val scansOpen = showScans && scans.isNotEmpty()
 
     val plan = remember(project) { project.toFloorPlan() }
     val selectedIndex = project.rooms.indexOfFirst { it.id == selectedId }.takeIf { it >= 0 }
@@ -80,6 +91,13 @@ fun PlanScreen(
                     }
                 },
                 actions = {
+                    if (scans.isNotEmpty()) {
+                        FilterChip(
+                            selected = scansOpen,
+                            onClick = { showScans = true },
+                            label = { Text("3D (${scans.size})") },
+                        )
+                    }
                     FilterChip(
                         selected = showAngles,
                         onClick = { showAngles = !showAngles },
@@ -138,6 +156,16 @@ fun PlanScreen(
         }
     }
 
+    if (scansOpen) {
+        ModalBottomSheet(onDismissRequest = { showScans = false }) {
+            ScanListSection(
+                scans,
+                onOpen = { showScans = false; onOpenScan(it) },
+                onDelete = onDeleteScan,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 24.dp).verticalScroll(rememberScrollState()),
+            )
+        }
+    }
     if (renaming && selectedRoom != null) {
         TextInputDialog(
             "Rename room", selectedRoom.name, "Rename",

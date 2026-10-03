@@ -5,7 +5,6 @@ import com.example.arruler.depth.PlaneKind
 import com.example.arruler.depth.RoomModel
 import com.example.arruler.depth.VoxelCloud
 import kotlin.math.abs
-import kotlin.math.roundToInt
 
 /** A detected plane in world space (meters, +Y up): unit normal, `n . p = d`, outline polygon as packed xyz. */
 class SnapshotPlane(
@@ -169,15 +168,6 @@ object Quality {
         val hitScore = ((hits - 1).toFloat() / (FULL_HITS - 1)).coerceIn(0f, 1f)
         return if (confidence == null) hitScore else hitScore * (0.5f + 0.5f * confidence.coerceIn(0f, 1f))
     }
-}
-
-/** The red -> yellow -> green ramp of the quality overlay, 0..255 channels (red at 0, yellow at 0.5, green at 1). */
-object QualityRamp {
-    fun r(q: Float): Int = (255 * (2f * (1f - q.coerceIn(0f, 1f))).coerceAtMost(1f)).roundToInt()
-    fun g(q: Float): Int = (255 * (2f * q.coerceIn(0f, 1f)).coerceAtMost(1f)).roundToInt()
-
-    /** Packed 0xRRGGBB. */
-    fun rgb(q: Float): Int = (r(q) shl 16) or (g(q) shl 8)
 }
 
 /** Fill colours of the surfaces by kind, packed 0xRRGGBB: floor green, wall blue, ceiling purple, other grey. */

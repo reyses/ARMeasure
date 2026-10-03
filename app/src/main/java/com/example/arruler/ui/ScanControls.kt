@@ -46,6 +46,7 @@ fun BoxScope.ScanControls(
     onStartPause: () -> Unit,
     onReset: () -> Unit,
     onAnalyze: () -> Unit,
+    onView3D: () -> Unit,
     onSave: () -> Unit,
 ) {
     val view = LocalView.current
@@ -106,6 +107,7 @@ fun BoxScope.ScanControls(
             GlassPill(if (scanning) "Pause" else "Start", Color(0xFF34C759)) { haptic(); onStartPause() }
             GlassPill("Reset", Color.White) { haptic(); onReset() }
             if (!analyzing && stats.voxels > 0) GlassPill("Analyze", Color.White) { haptic(); onAnalyze() }
+            if (!analyzing && stats.voxels > 0) GlassPill("View 3D", Color.White) { haptic(); onView3D() }
             if (savable) GlassPill("Save room", Color(0xFF34C759)) { haptic(); onSave() }
         }
     }

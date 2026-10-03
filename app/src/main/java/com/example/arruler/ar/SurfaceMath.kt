@@ -1,5 +1,6 @@
 package com.example.arruler.ar
 
+import com.example.arruler.geometry.ColorRamp
 import com.example.arruler.measure.MeasurePoint
 import dev.romainguy.kotlin.math.Quaternion
 import kotlin.math.sqrt
@@ -120,9 +121,6 @@ object SurfaceMath {
      */
     fun confidenceColor(confidence: Int, depthMm: Int, alpha: Int = 102): Int {
         if (depthMm <= 0) return 0
-        val t = (confidence and 0xFF) / 255f
-        val r = if (t < 0.5f) 255 else (255 * (1f - (t - 0.5f) * 2f)).toInt()
-        val g = if (t < 0.5f) (255 * t * 2f).toInt() else 255
-        return (alpha.coerceIn(0, 255) shl 24) or (r.coerceIn(0, 255) shl 16) or (g.coerceIn(0, 255) shl 8)
+        return ColorRamp.argb((confidence and 0xFF) / 255f, alpha)
     }
 }
