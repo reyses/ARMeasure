@@ -1,10 +1,33 @@
 package com.example.arruler
 
-import android.graphics.Color
+import android.graphics.Color as AndroidColor
 import android.os.Bundle
 import android.view.HapticFeedbackConstants
-import android.view.View
+import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import com.example.arruler.databinding.ActivityMainBinding
 import com.google.ar.core.Anchor
 import com.google.ar.core.HitResult
@@ -19,8 +42,8 @@ import com.google.ar.sceneform.rendering.MaterialFactory
 import com.google.ar.sceneform.rendering.ModelRenderable
 import com.google.ar.sceneform.rendering.ShapeFactory
 import com.google.ar.sceneform.ux.ArFragment
-import kotlin.math.sqrt
 import kotlin.math.abs
+import kotlin.math.sqrt
 
 class MainActivity : AppCompatActivity() {
 
@@ -37,7 +60,6 @@ class MainActivity : AppCompatActivity() {
     private var sphereRenderable: ModelRenderable? = null
     private var yellowMaterial: Material? = null
     private var cylinderRenderable: ModelRenderable? = null
-    private var currentDistanceMeters: Float = 0f
 
     private val tempStart = Vector3()
     private val tempEnd = Vector3()
@@ -46,43 +68,247 @@ class MainActivity : AppCompatActivity() {
     private val vectorUp = Vector3.up()
     private val tempRotation = Quaternion()
 
-    private var isMeasuring = false
-    private var unit = MeasurementUnit.CM
+    enum class MeasurementUnit { CM, INCH, M, FT }
+    enum class AppState { IDLE, MEASURING, FINISHED }
+
+    // Compose State
+    private var currentDistanceMeters by mutableFloatStateOf(0f)
+    private var appState by mutableStateOf(AppState.IDLE)
+    private var unit by mutableStateOf(MeasurementUnit.CM)
+    private var hasSurface by mutableStateOf(false)
 
     private val distanceFormatter = DistanceFormatter()
 
-    // Cache a reusable HitResult pair to avoid allocation if we wanted to optimization further,
-    // but performHitTest returns a new pair anyway.
-
-    enum class MeasurementUnit {
-        CM, INCH, M, FT
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        arFragment = supportFragmentManager.findFragmentById(R.id.arFragment) as ArFragment
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
+            insets // Let compose handle window insets automatically
+        }
 
-        // Sceneform 1.15+ specific: disable plane renderer by default
+        arFragment = supportFragmentManager.findFragmentById(R.id.arFragment) as ArFragment
         arFragment.arSceneView.planeRenderer.isEnabled = false
 
         setupRenderable()
         setupListeners()
-        updateUI()
+        setupComposeUI()
+    }
+
+    private fun setupComposeUI() {
+        binding.composeView.setContent {
+            MaterialTheme {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .windowInsetsPadding(WindowInsets.systemBars)
+                ) {
+                    // Center Crosshair
+                    val crosshairColor by animateColorAsState(
+                        if (hasSurface) Color(0xFF34C759) else Color.White,
+                        label = "crosshairColor"
+                    )
+                    val crosshairAlpha by animateFloatAsState(
+                        if (hasSurface) 1.0f else 0.5f,
+                        label = "crosshairAlpha"
+                    )
+                    val crosshairScale by animateFloatAsState(
+                        if (appState == AppState.MEASURING) 0.8f else 1.0f,
+                        label = "crosshairScale"
+                    )
+
+                    Icon(
+                        painter = painterResource(id = R.drawable.ic_crosshair),
+                        contentDescription = "Crosshair",
+                        tint = crosshairColor,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .align(Alignment.Center)
+                            .alpha(crosshairAlpha)
+                            .scale(crosshairScale)
+                    )
+
+                    // Reticle Info (Floating Text with Glass background)
+                    val reticleText = when {
+                        appState == AppState.MEASURING -> {
+                            val value = formatValue(currentDistanceMeters)
+                            distanceFormatter.format(value, getUnitText())
+                        }
+                        appState == AppState.FINISHED -> "Tap to Measure Again"
+                        hasSurface -> "Tap to Start"
+                        else -> "Find a surface"
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .offset(y = 48.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(Color.Black.copy(alpha = 0.4f))
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                    ) {
+                        AnimatedContent(targetState = reticleText, label = "reticleText") { text ->
+                            Text(
+                                text = text,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp
+                            )
+                        }
+                    }
+
+                    // Distance Display (Top)
+                    if (currentDistanceMeters > 0) {
+                        val value = formatValue(currentDistanceMeters)
+                        val formattedDistance = distanceFormatter.format(value, getUnitText())
+                        
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(top = 16.dp)
+                                .clip(RoundedCornerShape(32.dp))
+                                .background(Color(0xFF2C2C2E).copy(alpha = 0.85f))
+                                .padding(horizontal = 24.dp, vertical = 12.dp)
+                        ) {
+                            AnimatedContent(targetState = formattedDistance, label = "distance") { text ->
+                                Text(
+                                    text = text,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 32.sp
+                                )
+                            }
+                        }
+                    }
+
+                    // Bottom Controls (Modern Shutter Style)
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 32.dp)
+                            .fillMaxWidth()
+                            .padding(horizontal = 32.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Unit Toggle Button
+                        Surface(
+                            modifier = Modifier
+                                .size(64.dp)
+                                .clip(CircleShape)
+                                .clickable {
+                                    binding.root.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                                    switchUnit()
+                                },
+                            color = Color.Black.copy(alpha = 0.4f)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                AnimatedContent(targetState = getUnitText().uppercase(), label = "unit") { text ->
+                                    Text(text = text, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                }
+                            }
+                        }
+
+                        // Main Measure Shutter Button
+                        val shutterColor by animateColorAsState(
+                            targetValue = when (appState) {
+                                AppState.MEASURING -> Color(0xFFFF9500) // Orange
+                                AppState.FINISHED -> Color(0xFF007AFF) // Blue
+                                AppState.IDLE -> Color.White
+                            },
+                            label = "shutterColor"
+                        )
+                        
+                        val shutterIconTint by animateColorAsState(
+                            targetValue = if (appState == AppState.IDLE) Color.Black else Color.White,
+                            label = "shutterIconTint"
+                        )
+
+                        Surface(
+                            modifier = Modifier
+                                .size(80.dp)
+                                .clip(CircleShape)
+                                .clickable {
+                                    binding.root.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                                    onMainButtonClicked()
+                                },
+                            color = shutterColor,
+                            shadowElevation = 8.dp
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    painter = painterResource(id = R.drawable.ic_crosshair),
+                                    contentDescription = "Measure",
+                                    tint = shutterIconTint,
+                                    modifier = Modifier.size(32.dp)
+                                )
+                            }
+                        }
+
+                        // Clear Button
+                        Surface(
+                            modifier = Modifier
+                                .size(64.dp)
+                                .clip(CircleShape)
+                                .clickable {
+                                    binding.root.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                                    clearMeasurement()
+                                },
+                            color = Color.Black.copy(alpha = 0.4f)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    painter = painterResource(id = R.drawable.ic_clear),
+                                    contentDescription = "Clear",
+                                    tint = Color(0xFFFF3B30),
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun getUnitText(): String = when (unit) {
+        MeasurementUnit.CM -> "cm"
+        MeasurementUnit.INCH -> "in"
+        MeasurementUnit.M -> "m"
+        MeasurementUnit.FT -> "ft"
+    }
+
+    private fun formatValue(meters: Float): Float = when (unit) {
+        MeasurementUnit.CM -> meters * 100
+        MeasurementUnit.INCH -> meters * 39.37f
+        MeasurementUnit.M -> meters
+        MeasurementUnit.FT -> meters * 3.281f
+    }
+
+    private fun onMainButtonClicked() {
+        if (appState != AppState.MEASURING) {
+            if (startAnchor == null) {
+                startMeasurement()
+            } else {
+                clearMeasurement()
+                startMeasurement()
+            }
+        } else {
+            stopMeasurement()
+        }
     }
 
     private fun setupRenderable() {
-        MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(Color.RED))
+        MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(AndroidColor.RED))
             .thenAccept { material ->
                 sphereRenderable = ShapeFactory.makeSphere(0.015f, Vector3.zero(), material)
             }
 
-        MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(Color.YELLOW))
+        MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(AndroidColor.YELLOW))
             .thenAccept { material ->
                 yellowMaterial = material
-                // Create a unit cylinder with height 1.0, centered at Y=0.5
                 cylinderRenderable = ShapeFactory.makeCylinder(
                     0.003f,
                     1.0f,
@@ -93,45 +319,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupListeners() {
-        binding.btnMeasure.setOnClickListener {
-            it.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
-            if (!isMeasuring) {
-                if (startAnchor == null) {
-                    startMeasurement()
-                } else {
-                    // Reset to start new measurement
-                     clearMeasurement()
-                     startMeasurement()
-                }
-            } else {
-                stopMeasurement()
-            }
-        }
-
-        binding.btnClear.setOnClickListener {
-            it.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
-            clearMeasurement()
-        }
-
-        binding.btnUnit.setOnClickListener {
-            it.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
-            switchUnit()
-        }
-
-        arFragment.arSceneView.scene.addOnUpdateListener { frameTime ->
+        arFragment.arSceneView.scene.addOnUpdateListener {
             updateReticle()
-            if (isMeasuring && startAnchor != null) {
+            if (appState == AppState.MEASURING && startAnchor != null) {
                 updateLiveMeasurement()
             }
         }
 
-        arFragment.setOnTapArPlaneListener { hitResult, plane, motionEvent ->
-            // Use screen center instead of tap if possible for consistency,
-            // but for now, tap anywhere to place is also fine.
-            // However, the UX is moving towards "Tap button to place at reticle".
-            // So we might ignore scene taps or redirect them.
-            // For now, let's keep tap-to-place as an alternative if measuring.
-            if (isMeasuring && startAnchor != null) {
+        arFragment.setOnTapArPlaneListener { hitResult, plane, _ ->
+            if (appState == AppState.MEASURING && startAnchor != null) {
                 binding.root.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                 placeEndPoint(hitResult)
             }
@@ -139,30 +335,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateReticle() {
-        // Continuous hit test from center
         val hitPair = performHitTest()
-        if (hitPair != null) {
-            // Hit a plane
-            binding.centerCrosshair.setColorFilter(Color.parseColor("#34C759")) // Green
-            binding.centerCrosshair.alpha = 1.0f
-
-            if (!isMeasuring) {
-                if (startAnchor == null) {
-                    binding.tvReticleInfo.text = "Tap to Start"
-                } else {
-                    binding.tvReticleInfo.text = "Tap to Measure Again"
-                }
-            }
-            // If measuring, text is handled by updateLiveMeasurement or kept as is
-        } else {
-            // No plane
-            binding.centerCrosshair.setColorFilter(Color.WHITE)
-            binding.centerCrosshair.alpha = 0.5f
-
-            if (!isMeasuring && startAnchor == null) {
-                binding.tvReticleInfo.text = "Find a surface"
-            }
-        }
+        hasSurface = hitPair != null
     }
 
     private fun startMeasurement() {
@@ -181,8 +355,7 @@ class MainActivity : AppCompatActivity() {
             setParent(startNode)
         }
 
-        isMeasuring = true
-        updateUI()
+        appState = AppState.MEASURING
     }
 
     private fun placeEndPoint(hitResult: HitResult) {
@@ -197,14 +370,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         drawFinalLine()
-        stopMeasurement()
-
-        binding.root.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+        appState = AppState.FINISHED
     }
 
     private fun stopMeasurement() {
-        isMeasuring = false
-        updateUI()
+        appState = AppState.IDLE
     }
 
     private fun updateLiveMeasurement() {
@@ -214,35 +384,16 @@ class MainActivity : AppCompatActivity() {
         val startPos = startAnchor?.pose?.translation ?: return
         val endPos = hitPose.translation
 
-        // Manual distance calculation
         val dx = endPos[0] - startPos[0]
         val dy = endPos[1] - startPos[1]
         val dz = endPos[2] - startPos[2]
 
         currentDistanceMeters = sqrt(dx * dx + dy * dy + dz * dz)
 
-        // Set temp vectors for drawing
         tempStart.set(startPos[0], startPos[1], startPos[2])
         tempEnd.set(endPos[0], endPos[1], endPos[2])
 
         drawTemporaryLine(tempStart, tempEnd, currentDistanceMeters)
-
-        updateDistanceDisplay()
-
-        // Update Reticle Info with live distance
-        val value = when (unit) {
-            MeasurementUnit.CM -> currentDistanceMeters * 100
-            MeasurementUnit.INCH -> currentDistanceMeters * 39.37f
-            MeasurementUnit.M -> currentDistanceMeters
-            MeasurementUnit.FT -> currentDistanceMeters * 3.281f
-        }
-        val unitText = when (unit) {
-            MeasurementUnit.CM -> "cm"
-            MeasurementUnit.INCH -> "in"
-            MeasurementUnit.M -> "m"
-            MeasurementUnit.FT -> "ft"
-        }
-        binding.tvReticleInfo.text = distanceFormatter.format(value, unitText)
     }
 
     private fun drawTemporaryLine(start: Vector3, end: Vector3, distance: Float) {
@@ -256,7 +407,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Calculate rotation
         tempDiff.set(end.x - start.x, end.y - start.y, end.z - start.z)
 
         if (distance > 0) {
@@ -378,7 +528,7 @@ class MainActivity : AppCompatActivity() {
             Vector3.up()
         )
 
-        MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(Color.RED))
+        MaterialFactory.makeOpaqueWithColor(this, com.google.ar.sceneform.rendering.Color(AndroidColor.RED))
             .thenAccept { material ->
                 val lineRenderable = ShapeFactory.makeCylinder(
                     0.005f,
@@ -397,7 +547,6 @@ class MainActivity : AppCompatActivity() {
             }
 
         currentDistanceMeters = difference.length()
-        updateDistanceDisplay()
     }
 
     private fun performHitTest(): Pair<HitResult, Pose>? {
@@ -432,10 +581,7 @@ class MainActivity : AppCompatActivity() {
         lineNode = null
 
         currentDistanceMeters = 0f
-        isMeasuring = false
-
-        updateUI()
-        updateDistanceDisplay()
+        appState = AppState.IDLE
     }
 
     private fun switchUnit() {
@@ -445,57 +591,5 @@ class MainActivity : AppCompatActivity() {
             MeasurementUnit.M -> MeasurementUnit.FT
             MeasurementUnit.FT -> MeasurementUnit.CM
         }
-        updateUI()
-        updateDistanceDisplay()
-    }
-
-    private fun updateDistanceDisplay() {
-        val value = when (unit) {
-            MeasurementUnit.CM -> currentDistanceMeters * 100
-            MeasurementUnit.INCH -> currentDistanceMeters * 39.37f
-            MeasurementUnit.M -> currentDistanceMeters
-            MeasurementUnit.FT -> currentDistanceMeters * 3.281f
-        }
-
-        val unitText = when (unit) {
-            MeasurementUnit.CM -> "cm"
-            MeasurementUnit.INCH -> "in"
-            MeasurementUnit.M -> "m"
-            MeasurementUnit.FT -> "ft"
-        }
-
-        if (currentDistanceMeters > 0) {
-            binding.tvDistance.text = distanceFormatter.format(value, unitText)
-        } else {
-            binding.tvDistance.text = "—"
-        }
-    }
-
-    private fun updateUI() {
-        if (isMeasuring) {
-            // State: Measuring
-            // Button: Stop / Place
-            binding.btnMeasure.iconTint = android.content.res.ColorStateList.valueOf(Color.parseColor("#FF9500")) // Orange
-            binding.btnMeasure.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
-        } else if (startAnchor != null) {
-            // State: Finished
-            // Button: New
-             binding.btnMeasure.iconTint = android.content.res.ColorStateList.valueOf(Color.parseColor("#007AFF")) // Blue
-             binding.btnMeasure.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
-        } else {
-            // State: Idle
-            // Button: Start
-            binding.btnMeasure.iconTint = android.content.res.ColorStateList.valueOf(Color.BLACK)
-            binding.btnMeasure.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
-        }
-
-        binding.btnUnit.text = when (unit) {
-            MeasurementUnit.CM -> "CM"
-            MeasurementUnit.INCH -> "IN"
-            MeasurementUnit.M -> "M"
-            MeasurementUnit.FT -> "FT"
-        }
-
-        updateDistanceDisplay()
     }
 }
