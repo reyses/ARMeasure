@@ -18,7 +18,12 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
-            abiFilters 'arm64-v8a', 'x86_64'
+            // -PphoneOnly drops the x86_64 emulator libraries so a sideload APK stays small.
+            if (project.hasProperty('phoneOnly')) {
+                abiFilters 'arm64-v8a'
+            } else {
+                abiFilters 'arm64-v8a', 'x86_64'
+            }
         }
     }
 
@@ -47,6 +52,15 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    if (project.hasProperty('phoneOnly')) {
+        // Compressed native libraries: roughly half the APK size for sideloading, slower first install.
+        packaging {
+            jniLibs {
+                useLegacyPackaging = true
+            }
+        }
     }
 }
 
