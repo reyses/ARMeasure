@@ -1,6 +1,7 @@
 ﻿package com.example.arruler.plan
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -11,6 +12,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -19,6 +21,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
@@ -36,7 +39,8 @@ fun FloorPlanCanvas(
     units: Units,
     modifier: Modifier = Modifier,
     showAngles: Boolean = false,
-    selected: Int? = null
+    selected: Int? = null,
+    onRoomTap: ((Int?) -> Unit)? = null,
 ) {
     var zoom by remember { mutableStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
@@ -53,7 +57,18 @@ fun FloorPlanCanvas(
     val labelColor = cs.onSurfaceVariant
     val angleColor = cs.tertiary
 
-    Canvas(modifier.transformable(state)) {
+    val currentPlan by rememberUpdatedState(plan)
+    val currentTap by rememberUpdatedState(onRoomTap)
+    val tapModifier = Modifier.pointerInput(Unit) {
+        detectTapGestures { pos ->
+            val tap = currentTap ?: return@detectTapGestures
+            val base = PlanLayout.fit(currentPlan, size.width.toFloat(), size.height.toFloat(), 48.dp.toPx())
+            val t = base.zoomed(zoom, Vec2(pan.x, pan.y))
+            tap(currentPlan.hitRoom(t.toMeters(Vec2(pos.x, pos.y))))
+        }
+    }
+
+    Canvas(modifier.transformable(state).then(tapModifier)) {
         val w = size.width
         val h = size.height
         val base = PlanLayout.fit(plan, w, h, 48.dp.toPx())
@@ -82,15 +97,14 @@ fun FloorPlanCanvas(
         }
 
         // scale bar, bottom-left
-        val bar = PlanLayout.niceScaleBar(t, w * 0.3f)
+        val bar = PlanLayout.niceScaleBar(t, w * 0.3f, units)
         val bx = 16.dp.toPx()
         val by = h - 20.dp.toPx()
         val tick = 4.dp.toPx()
         drawLine(wallColor, Offset(bx, by), Offset(bx + bar.px, by), strokeWidth = wallStroke)
         drawLine(wallColor, Offset(bx, by - tick), Offset(bx, by + tick), strokeWidth = wallStroke)
         drawLine(wallColor, Offset(bx + bar.px, by - tick), Offset(bx + bar.px, by + tick), strokeWidth = wallStroke)
-        val barLabel = if (bar.meters < 1f) "${(bar.meters * 100).toInt()} cm" else "${bar.meters.toInt()} m"
-        drawCentered(measurer, barLabel, Vec2(bx + bar.px / 2f, by - 12.dp.toPx()), 0f, small.copy(color = labelColor))
+        drawCentered(measurer, bar.label, Vec2(bx + bar.px / 2f, by - 12.dp.toPx()), 0f, small.copy(color = labelColor))
 
         // north arrow, top-right (north is always up)
         val nx = w - 28.dp.toPx()

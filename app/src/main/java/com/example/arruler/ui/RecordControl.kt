@@ -105,7 +105,7 @@ fun BoxScope.PlaybackBadge(finished: Boolean) {
         fontSize = 12.sp,
         modifier = Modifier
             .align(Alignment.TopStart)
-            .padding(top = 20.dp, start = 16.dp)
+            .padding(top = 20.dp, start = 72.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(Color(0xFF007AFF).copy(alpha = 0.85f))
             .padding(horizontal = 10.dp, vertical = 6.dp),

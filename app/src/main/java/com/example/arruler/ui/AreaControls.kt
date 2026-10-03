@@ -114,7 +114,7 @@ fun BoxScope.AreaControls(
 }
 
 @Composable
-private fun GlassPill(label: String, tint: Color, selected: Boolean = false, onClick: () -> Unit) {
+internal fun GlassPill(label: String, tint: Color, selected: Boolean = false, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(24.dp))

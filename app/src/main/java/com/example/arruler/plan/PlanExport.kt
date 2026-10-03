@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
+import com.example.arruler.geometry.Vec2
 import com.example.arruler.measure.Units
 import java.util.Locale
 
@@ -46,6 +47,7 @@ fun toSvg(plan: FloorPlan, units: Units, showAngles: Boolean = false): String {
             .append("text-anchor=\"middle\" dominant-baseline=\"central\" fill=\"#222222\"$rot>")
             .append(xmlEscape(l.text)).append("</text>\n")
     }
+    appendSvgScaleAndNorth(sb, units, x0, y0, w, h)
     sb.append("</svg>\n")
     return sb.toString()
 }
@@ -88,6 +90,7 @@ fun toPngBitmap(plan: FloorPlan, units: Units, widthPx: Int, heightPx: Int, show
         c.drawText(l.text, q.x, q.y - (text.ascent() + text.descent()) / 2f, text)
         c.restore()
     }
+    drawBitmapScaleAndNorth(c, t, units, widthPx, heightPx, line, text)
     return bmp
 }
 
@@ -109,4 +112,58 @@ fun toDxf(plan: FloorPlan): String {
     }
     g(0, "ENDSEC"); g(0, "EOF")
     return sb.toString()
+}
+
+/** Scale bar (bottom-left) and north arrow (top-right) in SVG user units (mm). */
+private fun appendSvgScaleAndNorth(sb: StringBuilder, units: Units, x0: Float, y0: Float, w: Float, h: Float) {
+    val ink = "#222222"
+    val bar = PlanLayout.niceScaleBar(PlanTransform(1f, Vec2(0f, 0f), Vec2(0f, 0f)), w / 1000f * 0.3f, units)
+    val lenMm = bar.meters * 1000f
+    val bx = x0 + 400f
+    val by = y0 + h - 450f
+    val tick = 80f
+    fun line(ax: Float, ay: Float, bx2: Float, by2: Float) =
+        "<line class=\"scale\" x1=\"${f1(ax)}\" y1=\"${f1(ay)}\" x2=\"${f1(bx2)}\" y2=\"${f1(by2)}\" stroke=\"$ink\" stroke-width=\"40\"/>\n"
+    sb.append(line(bx, by, bx + lenMm, by))
+    sb.append(line(bx, by - tick, bx, by + tick))
+    sb.append(line(bx + lenMm, by - tick, bx + lenMm, by + tick))
+    sb.append("<text class=\"scale\" x=\"${f1(bx + lenMm / 2f)}\" y=\"${f1(by - 200f)}\" font-size=\"180\" ")
+        .append("font-family=\"sans-serif\" text-anchor=\"middle\" dominant-baseline=\"central\" fill=\"$ink\">")
+        .append(xmlEscape(bar.label)).append("</text>\n")
+    // north arrow: plan north is up in the SVG
+    val nx = x0 + w - 600f
+    val baseY = y0 + 1000f
+    val len = 500f
+    sb.append("<line class=\"north\" x1=\"${f1(nx)}\" y1=\"${f1(baseY)}\" x2=\"${f1(nx)}\" y2=\"${f1(baseY - len)}\" ")
+        .append("stroke=\"$ink\" stroke-width=\"40\"/>\n")
+    sb.append("<polygon class=\"north\" points=\"${f1(nx)},${f1(baseY - len - 100f)} ${f1(nx - 120f)},${f1(baseY - len + 120f)} ")
+        .append("${f1(nx + 120f)},${f1(baseY - len + 120f)}\" fill=\"$ink\"/>\n")
+    sb.append("<text class=\"north\" x=\"${f1(nx)}\" y=\"${f1(baseY - len - 320f)}\" font-size=\"180\" ")
+        .append("font-family=\"sans-serif\" text-anchor=\"middle\" dominant-baseline=\"central\" fill=\"$ink\">N</text>\n")
+}
+
+private fun drawBitmapScaleAndNorth(c: Canvas, t: PlanTransform, units: Units, widthPx: Int, heightPx: Int, line: Paint, text: Paint) {
+    val bar = PlanLayout.niceScaleBar(t, widthPx * 0.3f, units)
+    val bx = widthPx * 0.05f
+    val by = heightPx - widthPx * 0.04f
+    val tick = line.strokeWidth * 2.5f
+    c.drawLine(bx, by, bx + bar.px, by, line)
+    c.drawLine(bx, by - tick, bx, by + tick, line)
+    c.drawLine(bx + bar.px, by - tick, bx + bar.px, by + tick, line)
+    c.drawText(bar.label, bx + bar.px / 2f, by - tick - text.textSize * 0.4f, text)
+    // north arrow, top-right, north is up
+    val nx = widthPx - widthPx * 0.05f
+    val ny = minOf(widthPx, heightPx) * 0.11f
+    val len = minOf(widthPx, heightPx) * 0.045f
+    val head = line.strokeWidth * 3f
+    c.drawLine(nx, ny, nx, ny - len, line)
+    val tri = Path().apply {
+        moveTo(nx, ny - len - head)
+        lineTo(nx - head, ny - len + head)
+        lineTo(nx + head, ny - len + head)
+        close()
+    }
+    val fillPaint = Paint(line).apply { style = Paint.Style.FILL }
+    c.drawPath(tri, fillPaint)
+    c.drawText("N", nx, ny - len - head - text.textSize * 0.3f, text)
 }
