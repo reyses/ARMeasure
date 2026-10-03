@@ -58,6 +58,11 @@ object SpinText {
 
     const val PHONE_MOVED = "The phone moved. Put it back on the stand and keep it still."
     const val INSTRUCTION = "Turn the object slowly. Keep the phone still."
+
+    /** Shown between the turns: the second turn is taken from a steeper angle so the top of the object is seen. */
+    const val NEXT_TURN = "Next turn: tilt the phone down ~25°"
+
+    fun startTurnLabel(nextTurn: Int) = "Start turn $nextTurn"
 }
 
 /**
@@ -74,6 +79,15 @@ interface SpinCapture {
     /** Turn and photo counters while spinning, null otherwise. */
     val progress: StateFlow<SpinProgress?>
 
+    /** True between two turns: the photos are paused and [SpinText.NEXT_TURN] is shown until [nextTurn] is called. */
+    val betweenTurns: StateFlow<Boolean>
+
+    /** True while the current turn has enough photos to be ended early with [nextTurn] (and a further turn exists). */
+    val canEndTurn: StateFlow<Boolean>
+
+    /** Ends the running turn (-> between turns), or starts the next turn when between turns. */
+    fun nextTurn()
+
     /** Starts taking photos for [box] on its support plane; [hybrid] is true when a walk capture came first. */
     fun startSpinCapture(box: ObjectBox, plane: SupportPlane, hybrid: Boolean)
 
@@ -86,6 +100,9 @@ object NoSpinCapture : SpinCapture {
     override val available: Boolean = false
     override val phoneMoved: StateFlow<Boolean> = MutableStateFlow(false)
     override val progress: StateFlow<SpinProgress?> = MutableStateFlow(null)
+    override val betweenTurns: StateFlow<Boolean> = MutableStateFlow(false)
+    override val canEndTurn: StateFlow<Boolean> = MutableStateFlow(false)
+    override fun nextTurn() = Unit
     override fun startSpinCapture(box: ObjectBox, plane: SupportPlane, hybrid: Boolean) = Unit
     override fun stopSpinCapture() = Unit
 }

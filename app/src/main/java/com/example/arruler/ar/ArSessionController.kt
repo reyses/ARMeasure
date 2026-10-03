@@ -424,6 +424,9 @@ class ArSessionController(
     /** Size in pixels of the AR view (the space of the tap coordinates), 0 x 0 before the first layout. */
     val viewSize: Pair<Int, Int> get() = viewWidth to viewHeight
 
+    /** The camera id of the live session's config (the ML tap needs its sensor orientation), or null. */
+    fun cameraId(): String? = currentSession()?.cameraConfig?.cameraId
+
     /** The camera position of the latest frame, or null. */
     fun cameraPosition(): MeasurePoint? {
         val frame = lastFrame ?: return null

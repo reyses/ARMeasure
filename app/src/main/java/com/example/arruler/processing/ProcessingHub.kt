@@ -163,6 +163,12 @@ class ProcessingHub(
         )
     }
 
+    /** The manifest fields of a job built outside [DefaultJobPackager] (photo, spin and hybrid ZIPs). */
+    fun packageMeta(quality: ObjectQuality?, box: com.example.arruler.objscan.ObjectBox?, plane: com.example.arruler.objscan.SupportPlane?): PackageMeta {
+        val version = runCatching { app.packageManager.getPackageInfo(app.packageName, 0).versionName }.getOrNull() ?: "?"
+        return PackageMeta(version, isoNow(), DeviceProfile.read(app).summary(), quality, box, plane)
+    }
+
     /** Scratch directory for job and result ZIPs. */
     fun workDir(): File = File(app.cacheDir, "jobs").apply { mkdirs() }
 }

@@ -36,6 +36,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.arruler.R
 import com.example.arruler.measure.Units
+import com.example.arruler.objscan.TexturedMeshData
 import com.example.arruler.scan3d.ObjectShareFormat
 import com.example.arruler.scan3d.ObjectSummary
 import com.example.arruler.scan3d.Scan3DViewer
@@ -52,6 +53,8 @@ fun ObjectDetailScreen(
     projectName: String?,
     units: Units,
     hasVideo: Boolean,
+    /** The photo-textured mesh for the 3D view; null shows the grey mesh. */
+    textured: TexturedMeshData?,
     onBack: () -> Unit,
     onRename: (String) -> Unit,
     onSaveNotes: (String) -> Unit,
@@ -83,7 +86,7 @@ fun ObjectDetailScreen(
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             Box(Modifier.fillMaxWidth().height(300.dp)) {
-                Scan3DViewer(snapshot, onBack = onBack, modifier = Modifier.fillMaxWidth().height(300.dp), compact = true)
+                Scan3DViewer(snapshot, onBack = onBack, modifier = Modifier.fillMaxWidth().height(300.dp), compact = true, textured = textured)
             }
             Column(
                 Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),

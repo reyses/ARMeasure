@@ -84,13 +84,14 @@ object ExportLayout {
         ExportFileSpec(ExportNames.stamped(base, timeMs, "plan", "json", tz), MIME_JSON),
     )
 
-    fun objectFiles(name: String, textured: Boolean, video: Boolean): List<ExportFileSpec> = buildList {
+    fun objectFiles(name: String, textured: Boolean, video: Boolean, colourPly: Boolean = false): List<ExportFileSpec> = buildList {
         add(ExportFileSpec(ExportNames.plain(name, "mesh", "obj"), MIME_TEXT))
         if (textured) {
             add(ExportFileSpec(ExportNames.plain(name, "mesh", "mtl"), MIME_TEXT))
             add(ExportFileSpec(ExportNames.plain(name, "texture", "png"), MIME_PNG))
         }
         add(ExportFileSpec(ExportNames.plain(name, "mesh", "ply"), MIME_PLY))
+        if (colourPly) add(ExportFileSpec(ExportNames.plain(name, "mesh colour", "ply"), MIME_PLY))
         add(ExportFileSpec(ExportNames.plain(name, "measurements", "json"), MIME_JSON))
         add(ExportFileSpec(ExportNames.plain(name, "measurements", "txt"), MIME_TEXT))
         if (video) add(ExportFileSpec(ExportNames.plain(name, "capture", "mp4"), MIME_MP4))
@@ -232,26 +233,29 @@ class PublicExporter(
     }
 
     /**
-     * An object: mesh OBJ (+ MTL + texture PNG when [textured]), PLY, measurements JSON and TXT (in [units]),
+     * An object: mesh OBJ (+ MTL + texture PNG when [textured] has an atlas), PLY (+ the vertex-colour PLY when it has one), measurements JSON and TXT (in [units]),
      * and the capture video [video] when the file exists.
      */
     fun exportObject(
         info: ObjectExportInfo, mesh: TriMesh, textured: TexturedObject?, units: Units, video: File?,
     ): ExportResult {
         val hasVideo = video != null && video.isFile
-        val specs = ExportLayout.objectFiles(info.name, textured != null, hasVideo)
+        val atlasObj = textured?.takeIf { it.hasAtlas }
+        val colour = textured?.colourPly
+        val specs = ExportLayout.objectFiles(info.name, atlasObj != null, hasVideo, colour != null)
         val byName = HashMap<String, ContentSource>()
         val objName = ExportNames.plain(info.name, "mesh", "obj")
         val mtlName = ExportNames.plain(info.name, "mesh", "mtl")
         val pngName = ExportNames.plain(info.name, "texture", "png")
-        if (textured != null) {
-            byName[objName] = ContentSource.of(textured.obj.replace(TexturedObject.OBJ_MTL_REF, "mtllib $mtlName"))
-            byName[mtlName] = ContentSource.of(textured.mtl.replace(TexturedObject.MTL_PNG_REF, "map_Kd $pngName"))
-            byName[pngName] = ContentSource.of(textured.png)
+        if (atlasObj != null) {
+            byName[objName] = ContentSource.of(atlasObj.obj.replace(TexturedObject.OBJ_MTL_REF, "mtllib $mtlName"))
+            byName[mtlName] = ContentSource.of(atlasObj.mtl.replace(TexturedObject.MTL_PNG_REF, "map_Kd $pngName"))
+            byName[pngName] = ContentSource.of(atlasObj.png)
         } else {
             byName[objName] = ContentSource.of(mesh.toObj(ExportNames.sanitize(info.name, "object")))
         }
         byName[ExportNames.plain(info.name, "mesh", "ply")] = ContentSource.of(mesh.toBinaryPly())
+        if (colour != null) byName[ExportNames.plain(info.name, "mesh colour", "ply")] = ContentSource.of(colour)
         byName[ExportNames.plain(info.name, "measurements", "json")] = ContentSource.of(MeasurementsText.json(info, tz))
         byName[ExportNames.plain(info.name, "measurements", "txt")] = ContentSource.of(MeasurementsText.txt(info, units, tz))
         if (hasVideo) byName[ExportNames.plain(info.name, "capture", "mp4")] = ContentSource.of(video)

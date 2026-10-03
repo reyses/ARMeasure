@@ -34,7 +34,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.arruler.depth.PlaneKind
 import com.example.arruler.geometry.ColorRamp
+import com.example.arruler.objscan.TexturedMeshData
 import com.example.arruler.objscan.TriMesh
+import com.example.arruler.texture.TexturedMeshNode
+import com.example.arruler.texture.VertexColouredMeshNode
 import com.google.android.filament.Box as FilamentBox
 import com.google.android.filament.Engine
 import com.google.android.filament.MaterialInstance
@@ -157,7 +160,14 @@ private fun planeGeometry(engine: Engine, p: SnapshotPlane): Geometry {
  * camera manipulator). Toggles for Points / Surfaces / colour mode / big dots, a Top view button and a legend.
  */
 @Composable
-fun Scan3DViewer(snapshot: ScanSnapshot, onBack: () -> Unit, modifier: Modifier = Modifier, compact: Boolean = false) {
+fun Scan3DViewer(
+    snapshot: ScanSnapshot,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+    compact: Boolean = false,
+    /** The photo-textured (or vertex-coloured) version of the mesh; the grey mesh only when this is null. */
+    textured: TexturedMeshData? = null,
+) {
     BackHandler(enabled = !compact, onBack = onBack)
     var showPoints by remember { mutableStateOf(!compact || snapshot.mesh == null) }
     var showSurfaces by remember { mutableStateOf(true) }
@@ -207,7 +217,16 @@ fun Scan3DViewer(snapshot: ScanSnapshot, onBack: () -> Unit, modifier: Modifier 
                     }
                 }
                 if (showSurfaces) {
-                    snapshot.mesh?.let { mesh ->
+                    val photo = textured?.takeIf { it.atlas != null && it.uvs != null || it.vertexRgb != null }
+                    if (photo != null) {
+                        key("textured", photo) {
+                            if (photo.atlas != null && photo.uvs != null) {
+                                TexturedMeshNode(engine, materialLoader, photo.mesh, photo.uvs, photo.atlas)
+                            } else if (photo.vertexRgb != null) {
+                                VertexColouredMeshNode(engine, materialLoader, photo.mesh, photo.vertexRgb)
+                            }
+                        }
+                    } else snapshot.mesh?.let { mesh ->
                         key("mesh") {
                             val geo = remember(snapshot) { meshGeometry(engine, mesh, ViewerHooks.meshUv?.invoke(snapshot)?.takeIf { it.size == mesh.vertexCount * 2 }) }
                             // colour by kind: an object is "other" (grey)

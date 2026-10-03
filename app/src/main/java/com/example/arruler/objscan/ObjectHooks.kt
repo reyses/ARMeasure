@@ -10,12 +10,30 @@ class TexturedObject(
     val png: ByteArray,
     /** The best keyframe photo; when set it replaces the grey mesh render as the gallery thumbnail. */
     val bestPhoto: android.graphics.Bitmap? = null,
+    /** Vertex-colour PLY of the mesh (binary, float xyz + normals, uchar rgb); LOW-tier phones have only this. */
+    val colourPly: ByteArray? = null,
+    /** What the viewer draws; filled by the baker, or parsed from the stored files by `TexturedObjParser` when null. */
+    var viewData: TexturedMeshData? = null,
 ) {
+    /** True when [obj] / [mtl] / [png] hold a UV-mapped textured mesh (false for a vertex-colour-only result). */
+    val hasAtlas: Boolean get() = obj.isNotEmpty() && png.isNotEmpty()
+
     companion object {
         const val OBJ_MTL_REF = "mtllib mesh.mtl"
         const val MTL_PNG_REF = "map_Kd texture.png"
     }
 }
+
+/**
+ * A coloured mesh as the viewer draws it: [uvs] (two floats per vertex, origin top-left) with the [atlas] bitmap, or
+ * one 0xFFRRGGBB per vertex in [vertexRgb]. Both null means grey.
+ */
+class TexturedMeshData(
+    val mesh: TriMesh,
+    val uvs: FloatArray? = null,
+    val atlas: android.graphics.Bitmap? = null,
+    val vertexRgb: IntArray? = null,
+)
 
 /** What a [ResultAnnotator] / [TextureProvider] gets to look at once the object result exists. */
 class ResultContext(

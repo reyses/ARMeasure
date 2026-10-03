@@ -167,6 +167,34 @@ class PublicExportTest {
         assertTrue(sink.files.containsKey("Chair red mesh.ply"))
     }
 
+    @Test fun vertexColourOnlyResultKeepsTheGreyObjAndAddsTheColourPly() {
+        val sink = MemorySink()
+        val t = TexturedObject("", "", ByteArray(0), null, byteArrayOf(5, 6, 7))
+        assertFalse(t.hasAtlas)
+        exporter(sink).exportObject(info, mesh(), t, Units.CM, null)
+        assertEquals(
+            listOf("Chair red mesh.obj", "Chair red mesh.ply", "Chair red mesh colour.ply", "Chair red measurements.json", "Chair red measurements.txt"),
+            sink.files.keys.toList(),
+        )
+        assertTrue(sink.text("Chair red mesh.obj").contains("\nv "))      // grey OBJ, no mtllib
+        assertFalse(sink.text("Chair red mesh.obj").contains("mtllib"))
+        assertEquals(listOf<Byte>(5, 6, 7), sink.files.getValue("Chair red mesh colour.ply").toList())
+    }
+
+    @Test fun atlasResultWithColoursWritesObjMtlPngAndBothPlys() {
+        val sink = MemorySink()
+        val t = TexturedObject("mtllib mesh.mtl\nv 0 0 0\n", "newmtl m\nmap_Kd texture.png\n", byteArrayOf(9, 9), null, byteArrayOf(1))
+        exporter(sink).exportObject(info, mesh(), t, Units.CM, null)
+        assertTrue(sink.files.keys.containsAll(listOf("Chair red mesh.obj", "Chair red mesh.mtl", "Chair red texture.png", "Chair red mesh.ply", "Chair red mesh colour.ply")))
+    }
+
+    @Test fun shapeLineReachesBothMeasurementFiles() {
+        val sink = MemorySink()
+        exporter(sink).exportObject(info, mesh(), null, Units.CM, null)
+        assertTrue(sink.text("Chair red measurements.txt").contains("Shape: cylinder, r 9.8 cm"))
+        assertTrue(sink.text("Chair red measurements.json").contains("\"Shape\": \"cylinder, r 9.8 cm\""))
+    }
+
     @Test fun captureVideoIsCopiedWhenTheFileExists() {
         val video = tmp.newFile("rec.mp4").apply { writeBytes(ByteArray(1000) { 7 }) }
         val sink = MemorySink()

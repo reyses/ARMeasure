@@ -61,6 +61,10 @@ data class ObjectOutcome(
     val backend: String,
     val durationMs: Long,
     val notes: List<String>,
+    /** Photogrammetry (PC): photos sent and photos COLMAP registered, mean reprojection error in pixels. */
+    val images: Int? = null,
+    val registered: Int? = null,
+    val reprojectionPx: Double? = null,
 ) {
     /** Convex-ish when hull and occupancy volumes agree within 10 % (docs/OBJECT_SCAN.md). Null when unknown. */
     val hullToOccupancy: Double?
@@ -78,6 +82,7 @@ data class ObjectOutcome(
             return ObjectOutcome(
                 d.lengthM, d.widthM, r.measures.heightM?.recommended ?: d.heightM, v,
                 r.measures.volumeVariantsM3, r.stats.backend, r.stats.durationMs, r.stats.notes,
+                r.stats.images, r.stats.sparse?.registeredImages, r.stats.sparse?.meanReprojectionErrorPx,
             )
         }
     }
@@ -109,7 +114,58 @@ object ObjectCardText {
         out += "Height" to ShapeFormat.length(units, o.heightM.toFloat())
         out += "Volume" to volume(units, o.volume)
         o.hullToOccupancy?.let { if (it >= 1.1) out += "Note" to "approximate (hollow or concave shape)" }
-        out += "Computed" to "${o.backend}, " + String.format(Locale.US, "%.1f s", o.durationMs / 1000.0)
+        out += "Computed" to "${o.backend}, " + duration(o.durationMs)
+        photoLine(o)?.let { out += "PC photos" to it }
+        return out
+    }
+
+    /** '8.4 s' under two minutes, '4 min 12 s' above. */
+    fun duration(ms: Long): String {
+        val s = ms / 1000.0
+        return if (s < 120.0) String.format(Locale.US, "%.1f s", s) else "${(s / 60).toInt()} min ${(s % 60).toInt()} s"
+    }
+
+    /** '58 of 64 photos registered, 0.42 px mean reprojection error' (a part the server did not send is left out); null with no photo data. */
+    fun photoLine(o: ObjectOutcome): String? {
+        val n = o.images
+        val r = o.registered
+        if (n == null && r == null) return null
+        val head = when {
+            r != null && n != null -> "$r of $n photos registered"
+            r != null -> "$r photos registered"
+            else -> "$n photos sent"
+        }
+        return head + (o.reprojectionPx?.let { String.format(Locale.US, ", %.2f px mean reprojection error", it) } ?: "")
+    }
+
+    /** The method line saved with an object: 'pc, 58 of 64 photos registered, 4 min 12 s' or 'phone, 8.4 s'. */
+    fun method(o: ObjectOutcome): String {
+        val photos = photoLine(o)?.substringBefore(",")
+        return listOfNotNull(o.backend, photos, duration(o.durationMs)).joinToString(", ")
+    }
+
+    private fun estimateLine(units: Units, m: Measures): String? {
+        val d = m.objectDims
+        val v = m.volumeM3
+        if (d == null && v == null) return null
+        val parts = ArrayList<String>()
+        if (d != null) {
+            parts += num(units.fromMeters(d.lengthM.toFloat()), 1) + " x " + num(units.fromMeters(d.widthM.toFloat()), 1) + " x " +
+                num(units.fromMeters((m.heightM?.recommended ?: d.heightM).toFloat()), 1) + " " + units.symbol
+        }
+        if (v != null) parts += volume(units, v)
+        return parts.joinToString(", ")
+    }
+
+    /**
+     * Walk-only against fused numbers of a hybrid or spin PC result, as two card lines. Reads `measures.walk_only` and
+     * `measures.fused` (or the same keys at the top level of result.json); empty when the result carries neither, which
+     * is every result today. A missing half is left out, so a result with only the fused numbers shows one line.
+     */
+    fun fusionLines(units: Units, r: ResultJson): List<Pair<String, String>> {
+        val out = ArrayList<Pair<String, String>>()
+        (r.measures.walkOnly ?: r.walkOnly)?.let { m -> estimateLine(units, m)?.let { out += "Walk only" to it } }
+        (r.measures.fused ?: r.fused)?.let { m -> estimateLine(units, m)?.let { out += "Fused (walk + spin)" to it } }
         return out
     }
 }

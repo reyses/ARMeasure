@@ -8,6 +8,13 @@ A production-ready AR ruler application optimized for Android flagship devices, 
 - Shapes: box, cylinder, cone, sphere, frustum and pile volume and surface area from a few taps
 - Scan (devices with ARCore depth): sweep a room, get area, perimeter, height, volume and wall count
 - Object (devices with ARCore depth): place a box on the floor or a table, circle the object with a coverage dome as guide, get footprint, height and volume with a range, plus a 3D mesh to view, share (OBJ, PLY) and save
+- Object, tap to box: tap the object and ML Kit (on the phone, offline) finds it in the camera image and fits the box to its depth points; the coarse label ('Home good · 82 %') shows briefly, and where ML finds nothing the depth-only fit takes over
+- Object, shape recognition: a trained classifier plus least-squares fits name the object's simple shape (box, cylinder, sphere, cone) with its dimensions and formula volume on the result card, the detail page and in the exports; 'No simple shape fits' when none does
+- Object, textured meshes: the walk-around takes sharp keyframe photos (largest camera image up to 1920x1080 that keeps depth), and after the mesh is built they are baked onto it (a texture atlas on mid / high phones, a colour per vertex on low ones). The 3D view shows the coloured mesh, the best photo is the gallery thumbnail, and OBJ + MTL + texture PNG and a vertex-colour PLY are saved with the object
+- Object, Detailed quality (needs your PC): the walk-around photos with their ARCore poses go to the PC's photogrammetry; the PC's textured mesh (and its stats: photos registered, time) replaces the phone result
+- Object, Spin and Hybrid (need your PC): put the phone on a stand and turn the object (two turns, the second with the phone tilted down about 25°; a banner warns when the phone moved), or walk around once and then spin; the photos with box masks go to the PC as one job, and the result card shows walk-only against fused numbers when the PC reports both
+- Object, capture video: the AR session is recorded to one MP4 per capture (the whole walk and spin of a Hybrid is one file), kept with the saved object and played from its detail page
+- Downloads export: every save also copies to Download/ARMeasure/<project>: the mesh as OBJ (+ MTL + texture PNG when textured) and PLY (+ a vertex-colour PLY), measurements.json / .txt (with the shape line), and the capture video
 - PC processing: pair your PC with a QR code (Settings), then big scans and fine object meshes run on the PC (Auto, Phone or PC in Settings)
 - Projects: save rooms into projects, view the floor plan, export it
 - Recording and playback of AR sessions (MP4 datasets)

@@ -222,6 +222,7 @@ object JobPackage {
         val manifest = JobManifest(
             jobType = JobType.PHOTOGRAMMETRY.wire, appVersion = meta.appVersion, created = meta.created, device = meta.device,
             quality = (meta.quality ?: ObjectQuality.DETAILED).name,
+            box = meta.box?.toSpec(), supportPlane = meta.supportPlane?.toSpec(),
             imageCount = frames.size, files = listOf(POSES) + names
         )
         val poses = PosesFile(images = frames.mapIndexed { i, f ->

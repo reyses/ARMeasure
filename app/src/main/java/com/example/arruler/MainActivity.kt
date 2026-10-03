@@ -28,6 +28,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,12 +64,30 @@ import com.example.arruler.measure.shapes.ShapePreview
 import com.example.arruler.measure.toVec3
 import com.example.arruler.geometry.Vec3
 import com.example.arruler.depth.CaptureObserver
-import com.example.arruler.depth.ObjectCapture
+import com.example.arruler.ml.ImageOrientation
+import com.example.arruler.ml.MlAutoBox
+import com.example.arruler.ml.MlAutoBoxProvider
+import com.example.arruler.ml.MlFrameInput
+import com.example.arruler.ml.MlObjectDetector
+import com.example.arruler.ml.ShapeAnnotator
+import com.example.arruler.ml.captureMlTap
 import com.example.arruler.objscan.AutoBoxProvider
 import com.example.arruler.objscan.CaptureMode
 import com.example.arruler.objscan.DepthFitAutoBox
-import com.example.arruler.objscan.NoSpinCapture
 import com.example.arruler.objscan.ObjectBox
+import com.example.arruler.objscan.TexturedMeshData
+import com.example.arruler.texture.AndroidSpinCapture
+import com.example.arruler.texture.KeyframeLoader
+import com.example.arruler.texture.KeyframeRecord
+import com.example.arruler.texture.KeyframeTextureProvider
+import com.example.arruler.texture.KeyframeStore
+import com.example.arruler.texture.PcTexturedResult
+import com.example.arruler.texture.PhotogrammetryJobBuilder
+import com.example.arruler.texture.SpinJobBuilder
+import com.example.arruler.texture.SpinJobInput
+import com.example.arruler.texture.WalkKeyframes
+import com.example.arruler.texture.meshData
+import com.example.arruler.texture.CaptureMode as SpinJobMode
 import com.example.arruler.objscan.ObjectPlacement
 import com.example.arruler.objscan.PlaneRaycast
 import com.example.arruler.objscan.ResultAnnotator
@@ -106,6 +125,7 @@ import com.example.arruler.processing.JobEstimate
 import com.example.arruler.processing.JobType
 import com.example.arruler.processing.ObjectCardText
 import com.example.arruler.processing.ObjectOutcome
+import com.example.arruler.processing.PackageMeta
 import com.example.arruler.processing.PickerRows
 import com.example.arruler.processing.ProcessingHub
 import com.example.arruler.processing.ProcessingJob
@@ -174,6 +194,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicReference
 
 /** Thin wiring: AR session + measurement state + renderer + Compose UI + navigation. */
 class MainActivity : AppCompatActivity() {
@@ -212,26 +233,43 @@ class MainActivity : AppCompatActivity() {
     private var domeShown = false
     private var lastDomeMs = 0L
 
-    // ---- HOOKS for the ML / texture / spin work (docs/WIRING_ROUND3.md) ----
+    // ---- HOOKS for the ML / texture / spin work (docs/WIRING_ROUND3.md), all filled ----
 
-    /** HOOK ML: the 'tap the object' box. Swap this one line for the ML provider, e.g. `MlAutoBoxProvider(this)`. */
-    private val autoBoxProvider: AutoBoxProvider by lazy { DepthFitAutoBox() }
+    /** HOOK ML: ML Kit finds the object under the tap; the depth-only fit is the fallback (nothing found, an error, no depth in time). */
+    private val mlDetectorLazy = lazy { MlObjectDetector() }
 
-    /** HOOK SPIN: the spin capture (phone on a stand). [NoSpinCapture] until the real one exists; the cards then say 'coming soon'. */
-    private val spinCapture: SpinCapture = NoSpinCapture
+    /** The frame capture of the last tap, made on the main thread and taken once by the provider on its own thread. */
+    private val mlTapInput = AtomicReference<MlFrameInput?>(null)
+    private var mlLabel by mutableStateOf<String?>(null)
+    private var sensorOrientationOf: Pair<String, Int>? = null
 
-    /** HOOK TEXTURE: keyframe capture during the walk (start / frame / pause / finish / reset). Add the texture drone's observer here. */
-    private val captureObservers = mutableListOf<CaptureObserver>()
+    private val autoBoxProvider: AutoBoxProvider by lazy {
+        MlAutoBoxProvider(MlAutoBox(mlDetectorLazy.value), DepthFitAutoBox(), { mlTapInput.getAndSet(null) }, ::showMlLabel)
+    }
 
-    /** HOOK ML: extra result lines, e.g. the primitive fit ('Looks like a cylinder: r 9.8 cm, h 20.1 cm, formula volume ...'). */
-    private val resultAnnotators = listOf<ResultAnnotator>()
+    /** HOOK SPIN: the spin capture (phone on a stand): photos by image change in the box region, two turns, phone-moved check. */
+    private val spinCapture: AndroidSpinCapture by lazy { AndroidSpinCapture(File(cacheDir, "keyframes")) }
 
-    /** HOOK TEXTURE: bakes the textured mesh (OBJ + MTL + PNG) once the grey mesh exists; the first non-null wins. */
-    private val textureProviders = listOf<TextureProvider>()
+    /** HOOK TEXTURE: the walk-around photos, taken during the walk capture and stopped at Finish. */
+    private val walkKeyframes: WalkKeyframes by lazy { WalkKeyframes(File(cacheDir, "keyframes")) }
+    private val captureObservers: List<CaptureObserver> by lazy { listOf(walkKeyframes) }
+
+    /** HOOK ML: the 'Shape' line on the result card, the detail page and in the exports. */
+    private val resultAnnotators = listOf<ResultAnnotator>(ShapeAnnotator())
+
+    /** HOOK TEXTURE: bakes the photo texture of the grey mesh (atlas on MID / HIGH, vertex colours on LOW) once it exists. */
+    private val textureProviders: List<TextureProvider> by lazy {
+        listOf(KeyframeTextureProvider(walkKeyframes, { hub.profile.value.tier }, ::photoRotationDeg) { text, f -> procUi = ProcessingUi(text, f) })
+    }
 
     private lateinit var settings: AppSettings
     private var pendingMode = CaptureMode.WALK
-    private var pendingCapture: ObjectCapture? = null
+    private var chosenQuality = ProcQuality.QUICK
+
+    /** Box, support plane and photos of the capture that is being processed (set at Finish / Done, cleared at Reset). */
+    private var pendingBox: ObjectBox? = null
+    private var pendingPlane: SupportPlane? = null
+    private var pendingPhotos: Pair<File, List<KeyframeRecord>>? = null
     private var captureVideo: File? = null
     private var dragOffset: Pair<Float, Float>? = null
     private var objSaveOpen by mutableStateOf(false)
@@ -253,6 +291,9 @@ class MainActivity : AppCompatActivity() {
 
     // ---- 3D scan viewer ----
     private var scan3dSnapshot by mutableStateOf<ScanSnapshot?>(null)
+
+    /** The photo-textured mesh of a result being viewed before it is saved; null loads the saved one from disk (objects) or shows grey. */
+    private var scan3dTextured by mutableStateOf<TexturedMeshData?>(null)
     private var scanListVersion by mutableStateOf(0) // bump after save / delete to refresh scan lists
 
     /** Where Back from the 3D viewer goes: Measure for a fresh scan, the Plan for one opened from its list. */
@@ -351,6 +392,8 @@ class MainActivity : AppCompatActivity() {
             val pairedPc by hub.pairing.collectAsState()
             val phoneMoved by spinCapture.phoneMoved.collectAsState()
             val spinProgress by spinCapture.progress.collectAsState()
+            val betweenTurns by spinCapture.betweenTurns.collectAsState()
+            val canEndTurn by spinCapture.canEndTurn.collectAsState()
             val copyToDownloads by settings.copyToDownloads.collectAsState()
             val recordVideo by settings.recordCaptureVideo.collectAsState()
             ArRulerTheme {
@@ -410,7 +453,7 @@ class MainActivity : AppCompatActivity() {
                                 AppMode.OBJECT -> {
                                     ObjectControls(
                                         objState, state.unit, procUi,
-                                        ObjectHudInfo(pairedPc != null, spinCapture.available, phoneMoved, spinProgress),
+                                        ObjectHudInfo(pairedPc != null, spinCapture.available, phoneMoved, spinProgress, betweenTurns, canEndTurn, mlLabel),
                                         objectActions,
                                     )
                                     objResult?.let { r ->
@@ -491,7 +534,7 @@ class MainActivity : AppCompatActivity() {
                                     project?.let { exportPlan(it, format, state.unit, angles) }
                                 },
                                 scans = scans,
-                                onOpenScan = { id -> scan3dSnapshot = null; scan3dReturnTo = s; screen = Screen.Scan3D(id) },
+                                onOpenScan = { id -> scan3dSnapshot = null; scan3dTextured = null; scan3dReturnTo = s; screen = Screen.Scan3D(id) },
                                 onDeleteScan = { id -> ScanFiles.delete(scansRoot(this@MainActivity), id); scanListVersion++ },
                                 objects = remember(s.projectId, scanListVersion, projects) { objectItems(s.projectId, projects) },
                                 onOpenObject = { id -> objectReturnTo = s; screen = Screen.ObjectDetail(id) },
@@ -504,7 +547,9 @@ class MainActivity : AppCompatActivity() {
                             if (snap == null) {
                                 LaunchedEffect(Unit) { toast("Scan not found"); screen = scan3dReturnTo }
                             } else {
-                                Scan3DViewer(snap, onBack = { screen = scan3dReturnTo })
+                                val tex = scan3dTextured
+                                    ?: if (snap.kind == ScanSnapshot.KIND_OBJECT) rememberSavedTextured(s.scanId) else null
+                                Scan3DViewer(snap, onBack = { screen = scan3dReturnTo }, textured = tex)
                             }
                         }
                         Screen.Objects -> Surface(Modifier.fillMaxSize()) {
@@ -545,7 +590,7 @@ class MainActivity : AppCompatActivity() {
                             val paired by hub.pairing.collectAsState()
                             LaunchedEffect(Unit) { if (hub.pairing.value != null) hub.testConnection() }
                             val options = remember(pcStatus, paired) { hub.qualities(JobEstimate(pointCount = OBJECT_ESTIMATE_POINTS)) }
-                            val rows = remember(options) { PickerRows.forObject(options) }
+                            val rows = remember(options) { PickerRows.forObject(options, photoCapture = true) }
                             QualityPickerDialog(
                                 title = "Scan quality",
                                 rows = rows,
@@ -600,6 +645,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         ar.recorder.stop()
+        if (mlDetectorLazy.isInitialized()) mlDetectorLazy.value.close()
         renderer.release()
         ar.releaseAnchors()
         super.onDestroy()
@@ -763,6 +809,7 @@ class MainActivity : AppCompatActivity() {
             withContext(Dispatchers.IO) { runCatching { ScanFiles.save(scansRoot(this@MainActivity), snap) } }
                 .onFailure { toast("Could not save the scan: ${it.message}") }
             scan3dSnapshot = snap
+            scan3dTextured = null
             scan3dReturnTo = Screen.Measure
             scanListVersion++
             exportScanCopy(snap)
@@ -825,6 +872,7 @@ class MainActivity : AppCompatActivity() {
             onFit = ::onObjectFit,
             onChooseMode = ::onChooseCaptureMode,
             onBeginHybridSpin = ::onBeginHybridSpin,
+            onSpinNextTurn = spinCapture::nextTurn,
             onResume = ::onObjectResume,
             onPause = ::onObjectPause,
             onFinish = ::onObjectFinish,
@@ -840,7 +888,9 @@ class MainActivity : AppCompatActivity() {
         val t = frame.camera.pose
         objectScan.onFrame(frame, Vec3(t.tx(), t.ty(), t.tz()))
         val st = objectScan.state.value
-        if (st.phase == ObjectPhase.CAPTURING && !st.spinning) captureObservers.forEach { it.onFrame(frame) }
+        if (st.phase == ObjectPhase.CAPTURING) {
+            if (st.spinning) spinCapture.onFrame(frame) else captureObservers.forEach { it.onFrame(frame) }
+        }
         val now = SystemClock.elapsedRealtime()
         if (now - lastDomeMs < DOME_INTERVAL_MS) return
         lastDomeMs = now
@@ -887,10 +937,45 @@ class MainActivity : AppCompatActivity() {
         val cam = ar.cameraPosition()?.toVec3() ?: return
         val (w, h) = ar.viewSize
         haptic()
-        objectScan.tapObject(tap, SupportPlane.horizontal(planeY), cam, x, y, w, h, autoBoxProvider) { found ->
+        val plane = SupportPlane.horizontal(planeY)
+        captureMlTapInput(plane)
+        mlLabel = null
+        objectScan.tapObject(tap, plane, cam, x, y, w, h, autoBoxProvider) { found ->
             runOnUiThread {
                 snapHaptic()
                 if (!found) toastLong("Could not see the object's shape. Check the box, or tap Adjust to size it.")
+            }
+        }
+    }
+
+    /** Display rotation as the Surface.ROTATION_* constant (0 when the view has no display yet). */
+    private fun displayRotation(): Int = window?.decorView?.display?.rotation ?: 0
+
+    /** SENSOR_ORIENTATION of the live camera (cached per camera id); 90, the usual value, while there is no session. */
+    private fun sensorOrientation(): Int {
+        val id = ar.cameraId() ?: return 90
+        sensorOrientationOf?.takeIf { it.first == id }?.let { return it.second }
+        return MlObjectDetector.sensorOrientation(this, id).also { sensorOrientationOf = id to it }
+    }
+
+    /** Clockwise degrees that turn a sensor-orientation camera photo upright for the display (gallery photo). */
+    private fun photoRotationDeg(): Int =
+        ImageOrientation.rotationDegrees(sensorOrientation(), ImageOrientation.surfaceRotationDegrees(displayRotation()))
+
+    /** Copies the camera image of the tap's frame for the ML provider (main thread, inside the frame); null leaves the depth fit alone. */
+    private fun captureMlTapInput(plane: SupportPlane) {
+        mlTapInput.set(null)
+        val frame = ar.latestFrame ?: return
+        mlTapInput.set(runCatching { captureMlTap(frame, mlDetectorLazy.value, plane, displayRotation(), sensorOrientation()) }.getOrNull())
+    }
+
+    /** Shows the ML Kit label of the tapped object ('Home good · 82 %') for a few seconds; null clears it. Any thread. */
+    private fun showMlLabel(label: String?) {
+        runOnUiThread {
+            mlLabel = label
+            if (label != null) lifecycleScope.launch {
+                delay(ML_LABEL_MS)
+                if (mlLabel == label) mlLabel = null
             }
         }
     }
@@ -932,6 +1017,7 @@ class MainActivity : AppCompatActivity() {
                 val box = objectScan.state.value.box ?: return
                 objectScan.startSpin()
                 startCaptureVideo()
+                pendingPhotos = null
                 spinCapture.startSpinCapture(box, SupportPlane.horizontal(box.centre.y), hybrid = false)
             }
         }
@@ -982,16 +1068,51 @@ class MainActivity : AppCompatActivity() {
     private fun onObjectQualityChosen(id: String) {
         val q = runCatching { ProcQuality.valueOf(id) }.getOrNull() ?: return
         val box = objectScan.state.value.box ?: return
+        chosenQuality = q
+        pendingPhotos = null
+        // DETAILED and the walk of a HYBRID still collect depth for the coverage dome; the cloud is only used by the phone path and the hybrid ZIP
         objectScan.start(if (q == ProcQuality.FINE) ScanQuality.FINE else ScanQuality.QUICK, pendingMode)
         startCaptureVideo()
         captureObservers.forEach { it.onCaptureStart(box, SupportPlane.horizontal(box.centre.y), resumed = false) }
     }
 
-    /** HOOK SPIN: the spin photos are handed to the PC pipeline here once a real [SpinCapture] exists. */
+    /** SPIN: Done. The spin photos (both turns) go to the PC as one photo job with box masks. */
     private fun onSpinFinished() {
         spinCapture.stopSpinCapture()
         stopCaptureVideo()
-        toastLong("Spin photos are sent to your PC for processing")
+        val box = objectScan.state.value.box ?: return
+        val plane = SupportPlane.horizontal(box.centre.y)
+        lifecycleScope.launch {
+            val dir = spinCapture.dir
+            val recs = spinCapture.records()
+            if (dir == null || recs.size < WalkKeyframes.MIN_PHOTOS) {
+                return@launch toastLong("Only ${recs.size} photos were taken. Turn the object slowly with the phone still, then press Done.")
+            }
+            pendingPhotos = dir to recs
+            val meta = hub.packageMeta(ProcQuality.DETAILED, box, plane)
+            startPhotoJob(box, plane, photoJobOf(dir, recs.size, meta) { dest -> SpinJobBuilder.build(dest, SpinJobInput(SpinJobMode.SPIN, dir, box, plane, meta)) })
+        }
+    }
+
+    /** A photo job (PHOTOGRAMMETRY, DETAILED) whose ZIP is written by [build]; the upload size is the sum of the JPEGs in [dir]. */
+    private fun photoJobOf(dir: File, count: Int, meta: PackageMeta, build: (File) -> Unit): ProcessingJob {
+        val bytes = dir.listFiles { f -> f.name.endsWith(".jpg") }?.sumOf { it.length() } ?: 0L
+        return ProcessingJob(
+            type = JobType.PHOTOGRAMMETRY, quality = ProcQuality.DETAILED,
+            estimate = JobEstimate(imageCount = count, imageBytes = bytes), workDir = hub.workDir(),
+            objectBox = meta.box, supportPlane = meta.supportPlane, prebuilt = build,
+        )
+    }
+
+    /** Shows the working state and sends a photo job (DETAILED walk, SPIN, HYBRID) to the PC. */
+    private fun startPhotoJob(box: ObjectBox, plane: SupportPlane, job: ProcessingJob) {
+        pendingBox = box
+        pendingPlane = plane
+        objectScan.working()
+        renderer.renderDome(MeasurePoint(0f, 0f, 0f), emptyList(), 0f)
+        domeShown = false
+        procUi = ProcessingUi("Preparing the photos")
+        runObjectJob(job, confirmed = false)
     }
 
     private fun onObjectFinish() {
@@ -1001,25 +1122,76 @@ class MainActivity : AppCompatActivity() {
         if (before.spinning) spinCapture.stopSpinCapture()
         stopCaptureVideo()
         captureObservers.forEach { it.onCaptureFinish() }
+        val box = before.box ?: return
+        val plane = SupportPlane.horizontal(box.centre.y)
         lifecycleScope.launch {
-            val cap = objectScan.capture() ?: return@launch toast("Nothing captured yet. Move closer to the object.")
-            pendingCapture = cap
-            objectScan.working()
-            renderer.renderDome(MeasurePoint(0f, 0f, 0f), emptyList(), 0f)
-            domeShown = false
-            procUi = ProcessingUi("Preparing the scan")
-            val n = cap.points.size / 3
-            val job = ProcessingJob(
-                type = JobType.OBJECT_MESH,
-                quality = if (cap.quality == ScanQuality.FINE) ProcQuality.FINE else ProcQuality.QUICK,
-                estimate = JobEstimate(pointCount = n),
-                cloud = CloudData(cap.points, cap.hits, IntArray(n) { 255 }),
-                workDir = hub.workDir(),
-                objectBox = cap.box,
-                supportPlane = cap.plane,
-            )
-            runObjectJob(job, confirmed = false)
+            when {
+                before.captureMode == CaptureMode.HYBRID -> finishHybrid(box, plane)
+                chosenQuality == ProcQuality.DETAILED -> finishDetailed(box, plane)
+                else -> finishDepthScan(box, plane)
+            }
         }
+    }
+
+    /** QUICK / FINE: the depth cloud goes to the phone (or the PC on a LOW phone) as an object_mesh job. */
+    private suspend fun finishDepthScan(box: ObjectBox, plane: SupportPlane) {
+        val cap = objectScan.capture() ?: return toast("Nothing captured yet. Move closer to the object.")
+        pendingBox = box
+        pendingPlane = plane
+        pendingPhotos = null
+        objectScan.working()
+        renderer.renderDome(MeasurePoint(0f, 0f, 0f), emptyList(), 0f)
+        domeShown = false
+        procUi = ProcessingUi("Preparing the scan")
+        val n = cap.points.size / 3
+        val job = ProcessingJob(
+            type = JobType.OBJECT_MESH,
+            quality = if (cap.quality == ScanQuality.FINE) ProcQuality.FINE else ProcQuality.QUICK,
+            estimate = JobEstimate(pointCount = n),
+            cloud = CloudData(cap.points, cap.hits, IntArray(n) { 255 }),
+            workDir = hub.workDir(),
+            objectBox = box,
+            supportPlane = plane,
+        )
+        runObjectJob(job, confirmed = false)
+    }
+
+    /** DETAILED: the walk-around photos with their ARCore poses go to the PC's photogrammetry (the phone makes no mesh). */
+    private suspend fun finishDetailed(box: ObjectBox, plane: SupportPlane) {
+        val dir = walkKeyframes.dir
+        val recs = walkKeyframes.records()
+        if (dir == null || recs.size < WalkKeyframes.MIN_PHOTOS) {
+            return toastLong("Only ${recs.size} photos were taken. Walk slowly around the object, 30 cm or more away, then Finish.")
+        }
+        pendingPhotos = dir to recs
+        val meta = hub.packageMeta(ProcQuality.DETAILED, box, plane)
+        startPhotoJob(box, plane, photoJobOf(dir, recs.size, meta) { dest -> PhotogrammetryJobBuilder.build(dir, dest, meta) })
+    }
+
+    /** HYBRID: one ZIP with the spin photos + masks, the walk photos and the walk depth cloud. */
+    private suspend fun finishHybrid(box: ObjectBox, plane: SupportPlane) {
+        val spinDir = spinCapture.dir
+        val spinRecs = spinCapture.records()
+        val walkDir = walkKeyframes.dir
+        val walkRecs = walkKeyframes.records()
+        val cap = objectScan.capture()
+        if (spinDir == null || spinRecs.size < WalkKeyframes.MIN_PHOTOS) {
+            return toastLong("Only ${spinRecs.size} spin photos were taken. Turn the object slowly with the phone still, then press Done.")
+        }
+        if (walkDir == null || walkRecs.size < WalkKeyframes.MIN_PHOTOS || cap == null) {
+            return toastLong("The walk-around part has too little: ${walkRecs.size} photos. Reset and walk around the object first.")
+        }
+        pendingPhotos = spinDir to spinRecs
+        val meta = hub.packageMeta(ProcQuality.DETAILED, box, plane)
+        val cloud = CloudData(cap.points, cap.hits, IntArray(cap.points.size / 3) { 255 })
+        val bytes = (spinDir.listFiles().orEmpty().toList() + walkDir.listFiles().orEmpty().toList()).filter { it.name.endsWith(".jpg") }.sumOf { it.length() }
+        val job = ProcessingJob(
+            type = JobType.PHOTOGRAMMETRY, quality = ProcQuality.DETAILED,
+            estimate = JobEstimate(imageCount = spinRecs.size + walkRecs.size, imageBytes = bytes), workDir = hub.workDir(),
+            objectBox = box, supportPlane = plane,
+            prebuilt = { dest -> SpinJobBuilder.build(dest, SpinJobInput(SpinJobMode.HYBRID, spinDir, box, plane, meta, walkDir, cloud)) },
+        )
+        startPhotoJob(box, plane, job)
     }
 
     private fun runObjectJob(job: ProcessingJob, confirmed: Boolean) {
@@ -1050,16 +1222,31 @@ class MainActivity : AppCompatActivity() {
             objectScan.backToPaused()
             return toastLong("The result has no object dimensions")
         }
-        val mesh = if (done.backend == Backend.PHONE) job.mesh else done.resultZip?.let { loadResultMesh(it) }
-        val cap = pendingCapture
+        val box = pendingBox
+        val plane = pendingPlane
         val units = session.state.value.unit
-        var extras = emptyList<Pair<String, String>>()
+        val photoJob = job.type == JobType.PHOTOGRAMMETRY
+        val mesh: TriMesh?
         var textured: TexturedObject? = null
-        if (cap != null && (resultAnnotators.isNotEmpty() || textureProviders.isNotEmpty())) {
-            val ctx = ResultContext(mesh, cap.points, cap.box, cap.plane, summaryOf(outcome))
-            extras = resultAnnotators.flatMap { a -> runCatching { a.annotate(ctx, units) }.getOrDefault(emptyList()) }
-            textured = textureProviders.firstNotNullOfOrNull { p -> runCatching { p.bake(ctx) }.getOrNull() }
+        if (photoJob) {
+            // the PC's textured mesh (mesh.obj with UVs + texture.png) replaces any phone result
+            val zip = done.resultZip
+            val photo = pendingPhotos?.let { (dir, recs) ->
+                withContext(Dispatchers.IO) { runCatching { KeyframeLoader.bestPhoto(dir, recs, rotateDeg = photoRotationDeg()) }.getOrNull() }
+            }
+            val pc = zip?.let { z -> withContext(Dispatchers.IO) { runCatching { PcTexturedResult.read(z, box, plane, photo) }.getOrNull() } }
+            mesh = pc?.mesh ?: zip?.let { loadResultMesh(it) }
+            textured = pc?.textured
+        } else {
+            mesh = if (done.backend == Backend.PHONE) job.mesh else done.resultZip?.let { loadResultMesh(it) }
         }
+        var extras = emptyList<Pair<String, String>>()
+        if (box != null && plane != null) {
+            val ctx = ResultContext(mesh, job.isolated ?: FloatArray(0), box, plane, summaryOf(outcome))
+            extras = resultAnnotators.flatMap { a -> runCatching { a.annotate(ctx, units) }.getOrDefault(emptyList()) }
+            if (!photoJob) textured = textureProviders.firstNotNullOfOrNull { p -> runCatching { p.bake(ctx) }.getOrNull() }
+        }
+        extras = extras + ObjectCardText.fusionLines(units, done.result)
         objResult = ObjectResultState(outcome, mesh, null, extras, textured, textured?.bestPhoto, captureVideo)
         procUi = null
         objectScan.showResult()
@@ -1079,10 +1266,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun resetObject() {
-        if (objectScan.state.value.spinning || objectScan.state.value.captureMode != CaptureMode.WALK) spinCapture.stopSpinCapture()
+        spinCapture.discard()
         stopCaptureVideo()
         captureVideo = null
-        pendingCapture = null
+        pendingBox = null
+        pendingPlane = null
+        pendingPhotos = null
+        chosenQuality = ProcQuality.QUICK
+        mlTapInput.set(null)
+        mlLabel = null
         captureObservers.forEach { it.onCaptureReset() }
         objSaveOpen = false
         objResult = null
@@ -1120,7 +1312,7 @@ class MainActivity : AppCompatActivity() {
         id, projectId, System.currentTimeMillis(), FloatArray(0), FloatArray(0), emptyList(), null,
         mesh, ScanSnapshot.KIND_OBJECT, summaryOf(r.outcome),
         name = name,
-        method = "${r.outcome.backend}, " + String.format(java.util.Locale.US, "%.1f s", r.outcome.durationMs / 1000.0),
+        method = ObjectCardText.method(r.outcome),
         extras = r.extras.map { (k, v) -> "$k: $v" },
     )
 
@@ -1128,6 +1320,7 @@ class MainActivity : AppCompatActivity() {
         val mesh = r.mesh ?: return toast("No mesh was produced")
         val id = r.savedId ?: java.util.UUID.randomUUID().toString()
         scan3dSnapshot = objectSnapshot(r, id, null, mesh, null)
+        scan3dTextured = r.textured?.viewData
         scan3dReturnTo = Screen.Measure
         screen = Screen.Scan3D(id)
     }
@@ -1208,7 +1401,8 @@ class MainActivity : AppCompatActivity() {
 
     @Composable
     private fun BoxScope.ObjectResultCard(r: ObjectResultState, units: Units) {
-        val lines = ObjectCardText.lines(units, r.outcome) + r.extras +
+        val texture = r.textured?.let { listOf("Texture" to if (it.hasAtlas) "photos baked onto the mesh" else "colour per vertex") }.orEmpty()
+        val lines = ObjectCardText.lines(units, r.outcome) + r.extras + texture +
             (if (r.mesh == null) listOf("Mesh" to "not available (too sparse or too large)") else emptyList())
         ResultCard(
             "Object (${r.outcome.backend})",
@@ -1240,8 +1434,10 @@ class MainActivity : AppCompatActivity() {
         }
         val projectName = projects.firstOrNull { it.id == snap.projectId }?.name ?: ExportNames.DEFAULT_PROJECT
         val hasVideo = remember(scanId, scanListVersion) { ScanFiles.videoFile(root, scanId).isFile }
+        val textured = rememberSavedTextured(scanId)
         ObjectDetailScreen(
             snapshot = snap, projectName = projects.firstOrNull { it.id == snap.projectId }?.name, units = units, hasVideo = hasVideo,
+            textured = textured,
             onBack = { screen = objectReturnTo },
             onRename = { n -> ScanFiles.updateMeta(root, scanId, name = n.trim().ifEmpty { null }); scanListVersion++ },
             onSaveNotes = { n -> ScanFiles.updateMeta(root, scanId, notes = n); scanListVersion++; toast("Notes saved") },
@@ -1258,9 +1454,20 @@ class MainActivity : AppCompatActivity() {
                 val uri = PublicStorage.findUri(this, projectName, name)
                 if (!PublicStorage.playVideo(this, uri, ScanFiles.videoFile(root, scanId))) toastLong("No video player found for the capture video")
             },
-            onFullScreen = { scan3dSnapshot = snap; scan3dReturnTo = Screen.ObjectDetail(scanId); screen = Screen.Scan3D(scanId) },
+            onFullScreen = { scan3dSnapshot = snap; scan3dTextured = null; scan3dReturnTo = Screen.ObjectDetail(scanId); screen = Screen.Scan3D(scanId) },
             onDelete = { ScanFiles.delete(root, scanId); scanListVersion++; screen = objectReturnTo },
         )
+    }
+
+    /** The saved object's photo-textured mesh, loaded and parsed off the main thread (null while loading, or when the object is grey). */
+    @Composable
+    private fun rememberSavedTextured(scanId: String): TexturedMeshData? {
+        val loaded by produceState<TexturedMeshData?>(null, scanId, scanListVersion) {
+            value = withContext(Dispatchers.IO) {
+                runCatching { ScanFiles.loadTextured(scansRoot(this@MainActivity), scanId)?.meshData() }.getOrNull()
+            }
+        }
+        return loaded
     }
 
     /** Exports the object to Downloads when it is not there yet, then opens the folder. */
@@ -1399,6 +1606,7 @@ class MainActivity : AppCompatActivity() {
             withContext(Dispatchers.IO) { runCatching { ScanFiles.save(scansRoot(this@MainActivity), snap) } }
                 .onFailure { toast("Could not save the scan: ${it.message}") }
             scan3dSnapshot = snap
+            scan3dTextured = null
             scan3dReturnTo = Screen.Measure
             scanListVersion++
             exportScanCopy(snap)
@@ -1533,6 +1741,9 @@ class MainActivity : AppCompatActivity() {
 
         /** Dome markers are redrawn at most this often (2 Hz). */
         private const val DOME_INTERVAL_MS = 500L
+
+        /** The ML label of the tapped object stays on screen this long. */
+        private const val ML_LABEL_MS = 4000L
 
         /** Pause between holding the AR view paused and starting the QR scanner, so ARCore has let go of the camera. */
         private const val CAMERA_RELEASE_MS = 600L

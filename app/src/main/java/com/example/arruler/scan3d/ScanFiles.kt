@@ -140,6 +140,7 @@ object ScanFiles {
     const val THUMB_NAME = "thumb.png"
     const val VIDEO_NAME = "capture.mp4"
     const val TEXTURED_DIR = "textured"
+    const val COLOUR_PLY = "mesh_colour.ply"
 
     fun thumbFile(root: File, id: String): File = File(dir(root, id), THUMB_NAME)
 
@@ -162,20 +163,30 @@ object ScanFiles {
         return true
     }
 
-    /** Stores a textured mesh next to the grey one: textured/mesh.obj, mesh.mtl, texture.png (see [TexturedObject]). */
+    /** Stores a textured mesh next to the grey one: textured/mesh.obj, mesh.mtl, texture.png and the vertex-colour mesh_colour.ply (see [TexturedObject]). */
     fun saveTextured(root: File, id: String, t: TexturedObject) {
         val d = File(dir(root, id), TEXTURED_DIR)
         if (!d.isDirectory && !d.mkdirs()) throw IOException("cannot create $d")
-        writeAtomic(File(d, "mesh.obj"), t.obj.toByteArray(Charsets.UTF_8))
-        writeAtomic(File(d, "mesh.mtl"), t.mtl.toByteArray(Charsets.UTF_8))
-        writeAtomic(File(d, "texture.png"), t.png)
+        if (t.hasAtlas) {
+            writeAtomic(File(d, "mesh.obj"), t.obj.toByteArray(Charsets.UTF_8))
+            writeAtomic(File(d, "mesh.mtl"), t.mtl.toByteArray(Charsets.UTF_8))
+            writeAtomic(File(d, "texture.png"), t.png)
+        }
+        t.colourPly?.let { writeAtomic(File(d, COLOUR_PLY), it) }
     }
 
     fun loadTextured(root: File, id: String): TexturedObject? {
         val d = File(dir(root, id), TEXTURED_DIR)
         val obj = File(d, "mesh.obj"); val mtl = File(d, "mesh.mtl"); val png = File(d, "texture.png")
-        if (!obj.isFile || !mtl.isFile || !png.isFile) return null
-        return try { TexturedObject(obj.readText(Charsets.UTF_8), mtl.readText(Charsets.UTF_8), png.readBytes()) } catch (_: Exception) { null }
+        val colour = File(d, COLOUR_PLY).takeIf { it.isFile }
+        return try {
+            val ply = colour?.readBytes()
+            if (obj.isFile && mtl.isFile && png.isFile) TexturedObject(obj.readText(Charsets.UTF_8), mtl.readText(Charsets.UTF_8), png.readBytes(), null, ply)
+            else if (ply != null) TexturedObject("", "", ByteArray(0), null, ply)
+            else null
+        } catch (_: Exception) {
+            null
+        }
     }
 
     /** Rewrites only the name / notes of a saved scan (planes.json); false when the scan is missing. */

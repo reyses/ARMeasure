@@ -68,6 +68,8 @@ class ObjectActions(
     val onChooseMode: (CaptureMode) -> Unit,
     /** HYBRID: the walk is done, start the spin. */
     val onBeginHybridSpin: () -> Unit,
+    /** Spin stage: end the running turn, or start the next one while paused between turns. */
+    val onSpinNextTurn: () -> Unit,
     /** Resume from PAUSED. */
     val onResume: () -> Unit,
     val onPause: () -> Unit,
@@ -82,6 +84,12 @@ class ObjectHudInfo(
     val spinAvailable: Boolean,
     val phoneMoved: Boolean,
     val spinProgress: SpinProgress?,
+    /** Paused between two spin turns: the 'tilt the phone down' prompt shows. */
+    val betweenTurns: Boolean = false,
+    /** The running spin turn may be ended early. */
+    val canEndTurn: Boolean = false,
+    /** The ML Kit label of the object under the last tap ('Home good · 82 %'), shown briefly. */
+    val mlLabel: String? = null,
 )
 
 /**
@@ -130,6 +138,7 @@ fun BoxScope.ObjectControls(
                 }
                 if (help) CaptureHelpSheet { help = false }
             } else {
+                hud.mlLabel?.let { Info(it, icon = R.drawable.ic_info) }
                 state.box?.let { Info(boxText(units, it), bold = true) }
                 Info(
                     if (state.fitting) "Looking for the object..." else "Check the box. Drag on the screen to move it.",
@@ -163,7 +172,15 @@ fun BoxScope.ObjectControls(
             ObjectPhase.CAPTURING, ObjectPhase.PAUSED -> if (state.spinning) {
                 if (hud.phoneMoved) Banner(SpinText.PHONE_MOVED)
                 Info(hud.spinProgress?.let(SpinText::progress) ?: "Starting the spin...", bold = true)
-                Info(SpinText.INSTRUCTION)
+                if (hud.betweenTurns) {
+                    Info(SpinText.NEXT_TURN, bold = true)
+                    BigButton(
+                        SpinText.startTurnLabel((hud.spinProgress?.turn ?: 1) + 1), R.drawable.ic_rotate, Color(0xFF34C759),
+                    ) { haptic(); actions.onSpinNextTurn() }
+                } else {
+                    Info(SpinText.INSTRUCTION)
+                    if (hud.canEndTurn) ActionPill("Next turn", R.drawable.ic_rotate) { haptic(); actions.onSpinNextTurn() }
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     ActionPill("Done", R.drawable.ic_check) { haptic(); actions.onFinish() }
                     ActionPill("Reset", null) { haptic(); actions.onReset() }

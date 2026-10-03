@@ -28,7 +28,7 @@ object ObjectShare {
         val files = ArrayList<File>()
         fun out(part: String, ext: String) = File(dir, ExportNames.plain(info.name, part, ext)).also { files += it }
         when (format) {
-            ObjectShareFormat.OBJ -> if (textured != null) {
+            ObjectShareFormat.OBJ -> if (textured != null && textured.hasAtlas) {
                 val mtl = ExportNames.plain(info.name, "mesh", "mtl")
                 val png = ExportNames.plain(info.name, "texture", "png")
                 out("mesh", "obj").writeText(textured.obj.replace(TexturedObject.OBJ_MTL_REF, "mtllib $mtl"), Charsets.UTF_8)
@@ -37,7 +37,10 @@ object ObjectShare {
             } else {
                 out("mesh", "obj").writeText(mesh.toObj(ExportNames.sanitize(info.name, "object")), Charsets.UTF_8)
             }
-            ObjectShareFormat.PLY -> out("mesh", "ply").writeBytes(mesh.toBinaryPly())
+            ObjectShareFormat.PLY -> {
+                val colour = textured?.colourPly
+                if (colour != null) out("mesh colour", "ply").writeBytes(colour) else out("mesh", "ply").writeBytes(mesh.toBinaryPly())
+            }
             ObjectShareFormat.JSON -> out("measurements", "json").writeText(MeasurementsText.json(info), Charsets.UTF_8)
             ObjectShareFormat.TXT -> out("measurements", "txt").writeText(MeasurementsText.txt(info, units), Charsets.UTF_8)
         }

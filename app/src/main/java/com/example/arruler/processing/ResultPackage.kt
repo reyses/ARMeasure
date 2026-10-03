@@ -32,7 +32,18 @@ data class Measures(
     /** Named volume variants in m3, e.g. "bounding_box", "convex_hull", "mesh". */
     @SerialName("volume_variants_m3") val volumeVariantsM3: Map<String, Double> = emptyMap(),
     @SerialName("wall_count") val wallCount: Int? = null,
-    @SerialName("object_dims") val objectDims: ObjectDims? = null
+    @SerialName("object_dims") val objectDims: ObjectDims? = null,
+    /** Hybrid / spin PC results may carry both numbers: the walk-around alone and the fusion with the spin photos. */
+    @SerialName("walk_only") val walkOnly: Measures? = null,
+    val fused: Measures? = null,
+)
+
+/** COLMAP sparse-model statistics of a photogrammetry result (`stats.sparse`). */
+@Serializable
+data class SparseStats(
+    @SerialName("registered_images") val registeredImages: Int? = null,
+    val points: Int? = null,
+    @SerialName("mean_reprojection_error_px") val meanReprojectionErrorPx: Double? = null,
 )
 
 @Serializable
@@ -41,7 +52,10 @@ data class ProcessingStats(
     val backend: String,
     @SerialName("duration_ms") val durationMs: Long,
     val versions: Map<String, String> = emptyMap(),
-    val notes: List<String> = emptyList()
+    val notes: List<String> = emptyList(),
+    /** Photogrammetry: images the job carried, and how many COLMAP registered. */
+    val images: Int? = null,
+    val sparse: SparseStats? = null,
 )
 
 @Serializable
@@ -50,7 +64,10 @@ data class ResultJson(
     @SerialName("job_type") val jobType: String,
     val measures: Measures,
     val stats: ProcessingStats,
-    val files: List<String> = emptyList()
+    val files: List<String> = emptyList(),
+    /** Optional top-level twins of [Measures.walkOnly] / [Measures.fused] (read from either place). */
+    @SerialName("walk_only") val walkOnly: Measures? = null,
+    val fused: Measures? = null,
 )
 
 @Serializable

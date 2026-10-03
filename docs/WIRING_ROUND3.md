@@ -1,5 +1,13 @@
 # Round 3 wiring: hook points for the ML, texture and spin work
 
+**Status (2026-10-03): every hook below is filled.** `autoBoxProvider` = `MlAutoBoxProvider` (ML Kit, falls back to `DepthFitAutoBox`),
+`resultAnnotators` = `ShapeAnnotator`, `captureObservers` = `WalkKeyframes`, `textureProviders` = `KeyframeTextureProvider`,
+`spinCapture` = `AndroidSpinCapture` (its `onFrame` is called from `onObjectFrame` while the spin stage runs; `SpinCapture` gained
+`betweenTurns`, `canEndTurn`, `nextTurn()`). DETAILED, SPIN and HYBRID send a photo job built by `PhotogrammetryJobBuilder` /
+`SpinJobBuilder` through `ProcessingJob.prebuilt`; the PC's `mesh.obj` + `texture.png` come back through `PcTexturedResult`.
+`ViewerHooks` is no longer used: `Scan3DViewer(..., textured = TexturedMeshData)` draws the baked mesh (the BakedMesh has duplicated
+seam vertices, so it cannot share the grey mesh's vertex count). Capture video: one MP4 across the walk and spin phases of a Hybrid.
+
 All hooks live in `MainActivity` (section "HOOKS") as one line each. Everything below is wired and called today with an
 empty default, so a feature is switched on by filling that one line.
 

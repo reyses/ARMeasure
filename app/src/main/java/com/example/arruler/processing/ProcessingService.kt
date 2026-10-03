@@ -43,9 +43,17 @@ class ProcessingJob(
     /** Object jobs: the placed box and the horizontal support plane (also sent to the PC in the manifest). */
     val objectBox: ObjectBox? = null,
     val supportPlane: SupportPlane? = null,
+    /**
+     * Writes the upload ZIP itself (photo jobs built by the texture package: walk keyframes, spin, hybrid). When set the
+     * packager calls it with the destination file instead of building the package from [cloud] / [photos].
+     */
+    val prebuilt: ((File) -> Unit)? = null,
 ) {
     /** Side output of the phone runner for OBJECT_MESH (a PC job returns its mesh inside the result ZIP). */
     @Volatile var mesh: TriMesh? = null
+
+    /** Side output of the phone runner for OBJECT_MESH: the isolated object points (world, packed xyz) for the shape recognition. */
+    @Volatile var isolated: FloatArray? = null
 }
 
 sealed interface ProcessingState {
@@ -73,6 +81,7 @@ class DefaultJobPackager(
     private val now: () -> String = ::isoNow
 ) : JobPackager {
     override fun pack(job: ProcessingJob, dest: File) {
+        job.prebuilt?.let { it(dest); return }
         val meta = PackageMeta(appVersion, now(), device(), job.quality, job.objectBox, job.supportPlane)
         if (job.type == JobType.PHOTOGRAMMETRY) JobPackage.writePhotoJob(dest, job.photos, meta)
         else JobPackage.writePointJob(dest, job.type, requireNotNull(job.cloud) { "point job without cloud" }, meta)
@@ -128,6 +137,7 @@ private fun runObject(job: ProcessingJob, t0: Long): ResultJson {
     }
     val out = ObjectPipeline.run(cloud.xyz, cloud.hits, box, plane, q)
     job.mesh = out.mesh
+    job.isolated = out.isolated
     val m = out.measures
     val variants = LinkedHashMap<String, Double>()
     variants["bounding_box"] = m.orientedBoxVolume.toDouble()
