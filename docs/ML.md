@@ -7,7 +7,7 @@ because of this feature.
 
 | Piece | File | What it does | Runs |
 |---|---|---|---|
-| 2D proposals | `ObjectDetector.kt` (`MlObjectDetector`) | ML Kit **Subject Segmentation** (Google Play services build) on the ARCore CPU image; returns subject boxes in sensor IMAGE_PIXELS | on device, Play services module |
+| 2D proposals | `ObjectDetector.kt` (`MlObjectDetector`) | ML Kit **Object Detection** (bundled model) on the ARCore CPU image; returns boxes + coarse labels in sensor IMAGE_PIXELS | on device |
 | Orientation / YUV | `ImageOrientation.kt` | display + sensor rotation math, YUV_420_888 to NV21 | plain Kotlin |
 | Tap selection + 3D box | `TapToBox.kt` | tap to detection, depth points inside the 2D box and above the plane, objscan isolation + oriented footprint, aligned `ObjectBox` with 1 cm padding | plain Kotlin |
 | Primitive fits | `PrimitiveFit.kt` | least-squares BOX / CYLINDER / SPHERE / CONE with parameters, formula volume, RMS score | plain Kotlin |
@@ -17,45 +17,22 @@ because of this feature.
 
 ### Library choice and size (measured, phone APK, `-PphoneOnly` debug, clean builds)
 
-| Variant | APK bytes | delta |
-|---|---|---|
-| Baseline (this branch, no ML Kit) | 27,986,247 | 0 |
-| `com.google.mlkit:object-detection:17.0.2` (bundled) | 36,197,277 | **+8,211,030** (libmlkitcommonpipeline.so 4.7 MB compressed + two tflite models 3.0 MB + dex) |
-| `com.google.android.gms:play-services-mlkit-subject-segmentation:16.0.0-beta1` (**shipped**) | 28,098,767 | **+112,520** |
+Shipped: stable `com.google.mlkit:object-detection:17.0.2`, bundled base model (offline from the first launch, no Play-services download),
+SINGLE_IMAGE mode, multiple objects, classification on. `Detection.label` / `confidence` carry the coarse ML Kit class
+(Home good, Fashion good, Food, Place, Plant) of the most confident label.
 
-The bundled Object Detection would put the phone APK at 34.5 MiB, over the 30 MiB budget. Google publishes no Play-services
-build of Object Detection (checked on Google Maven: only barcode, document scanner, face, image labeling, language id, smart reply,
-subject segmentation, text recognition), so the unbundled route is Subject Segmentation. Consequences:
+| Variant | APK bytes |
+|---|---|
+| Baseline (no ML Kit) | 27,986,247 |
+| `object-detection:17.0.2` bundled (**shipped**) | 36,197,209 (+8,210,962: libmlkitcommonpipeline.so, two tflite models, dex) |
 
-* it is **beta** (16.0.0-beta1 is the newest release; there is no stable one),
-* it returns salient subjects with a box, **no class label** (`Detection.label` is null; the shape label comes from our classifier),
-* Play services downloads the module once (a few MB, not counted in the APK). Call `MlObjectDetector.warmUp()` when the object screen opens, or add to
-  the manifest `<application>` so the download happens at install time:
-  `<meta-data android:name="com.google.mlkit.vision.DEPENDENCIES" android:value="subject_segment" />`.
-  This is the only network use; inference itself is offline.
-
-If the 8.2 MB is acceptable later, swap `MlObjectDetector.detect()` for the bundled detector (labels + confidence, classification on):
-
-```kotlin
-// implementation 'com.google.mlkit:object-detection:17.0.2'
-private val detector = ObjectDetection.getClient(ObjectDetectorOptions.Builder()
-    .setDetectorMode(ObjectDetectorOptions.SINGLE_IMAGE_MODE).enableMultipleObjects().enableClassification().build())
-// in detect(): detector.process(input) -> List<DetectedObject>; o.boundingBox is in the upright image, map it with
-// ImageOrientation.uprightBoxToImage(...) exactly as the subject boxes are; label = o.labels.maxByOrNull { it.confidence }
-```
+The size limit was lifted by the owner. The beta Play-services subject-segmentation alternative (+112 KB, boxes only, module download) was removed.
 
 ### Dependency edits (exact)
 
-`gradle/libs.versions.toml`:
-```
-[versions]   + mlkitSubjectSegmentation = "16.0.0-beta1"
-[libraries]  + play-services-mlkit-subject-segmentation = { group = "com.google.android.gms", name = "play-services-mlkit-subject-segmentation", version.ref = "mlkitSubjectSegmentation" }
-```
-`app/build.gradle` (dependencies, after the code scanner):
-```
-implementation libs.play.services.mlkit.subject.segmentation
-```
-
+`gradle/libs.versions.toml`: `[versions]` `mlkitObjectDetection = "17.0.2"`; `[libraries]`
+`mlkit-object-detection = { group = "com.google.mlkit", name = "object-detection", version.ref = "mlkitObjectDetection" }`.
+`app/build.gradle`: `implementation libs.mlkit.object.detection`.
 ## Privacy
 
 All images are processed in memory by the on-device model. Nothing from this feature is uploaded: the camera frame is copied to an NV21 array,
