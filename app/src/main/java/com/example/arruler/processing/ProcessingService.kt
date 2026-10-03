@@ -3,6 +3,10 @@ package com.example.arruler.processing
 import com.example.arruler.depth.PlaneExtractor
 import com.example.arruler.depth.PlaneKind
 import com.example.arruler.depth.RoomFromPlanes
+import com.example.arruler.objscan.ObjectBox
+import com.example.arruler.objscan.ObjectPipeline
+import com.example.arruler.objscan.SupportPlane
+import com.example.arruler.objscan.TriMesh
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -35,8 +39,14 @@ class ProcessingJob(
     val estimate: JobEstimate,
     val cloud: CloudData? = null,
     val photos: List<PhotoFrame> = emptyList(),
-    val workDir: File
-)
+    val workDir: File,
+    /** Object jobs: the placed box and the horizontal support plane (also sent to the PC in the manifest). */
+    val objectBox: ObjectBox? = null,
+    val supportPlane: SupportPlane? = null,
+) {
+    /** Side output of the phone runner for OBJECT_MESH (a PC job returns its mesh inside the result ZIP). */
+    @Volatile var mesh: TriMesh? = null
+}
 
 sealed interface ProcessingState {
     data class Routed(val decision: RouteDecision) : ProcessingState
@@ -63,7 +73,7 @@ class DefaultJobPackager(
     private val now: () -> String = ::isoNow
 ) : JobPackager {
     override fun pack(job: ProcessingJob, dest: File) {
-        val meta = PackageMeta(appVersion, now(), device(), job.quality)
+        val meta = PackageMeta(appVersion, now(), device(), job.quality, job.objectBox, job.supportPlane)
         if (job.type == JobType.PHOTOGRAMMETRY) JobPackage.writePhotoJob(dest, job.photos, meta)
         else JobPackage.writePointJob(dest, job.type, requireNotNull(job.cloud) { "point job without cloud" }, meta)
     }
@@ -77,7 +87,7 @@ fun interface PhoneRunner {
     suspend fun run(job: ProcessingJob): ResultJson
 }
 
-/** SCAN_ANALYZE via the existing pure pipeline; OBJECT_MESH is a TODO until objscan/ lands. */
+/** SCAN_ANALYZE via the existing pure pipeline, OBJECT_MESH via objscan/ ([ObjectPipeline]). */
 class DefaultPhoneRunner : PhoneRunner {
     override suspend fun run(job: ProcessingJob): ResultJson = withContext(Dispatchers.Default) {
         val t0 = System.nanoTime()
@@ -101,11 +111,47 @@ class DefaultPhoneRunner : PhoneRunner {
                         notes = listOf("planes=${planes.size}", "walls=${planes.count { it.kind == PlaneKind.WALL }}"))
                 )
             }
-            // TODO: wire objscan/ (isolated points -> measures + mesh) once that package exists.
-            JobType.OBJECT_MESH -> throw UnsupportedOperationException("Object meshing on the phone is not implemented yet")
+            JobType.OBJECT_MESH -> runObject(job, t0)
             JobType.PHOTOGRAMMETRY -> throw UnsupportedOperationException("Photogrammetry runs only on the PC")
         }
     }
+}
+
+/** Phone path of OBJECT_MESH: isolate, measure and mesh with objscan, then express it as the protocol result. */
+private fun runObject(job: ProcessingJob, t0: Long): ResultJson {
+    val cloud = requireNotNull(job.cloud) { "no cloud" }
+    val box = requireNotNull(job.objectBox) { "no object box" }
+    val plane = requireNotNull(job.supportPlane) { "no support plane" }
+    val q = when (job.quality) {
+        ObjectQuality.FINE -> com.example.arruler.objscan.ObjectQuality.FINE
+        else -> com.example.arruler.objscan.ObjectQuality.QUICK
+    }
+    val out = ObjectPipeline.run(cloud.xyz, cloud.hits, box, plane, q)
+    job.mesh = out.mesh
+    val m = out.measures
+    val variants = LinkedHashMap<String, Double>()
+    variants["bounding_box"] = m.orientedBoxVolume.toDouble()
+    variants["convex_hull"] = m.hullVolume.toDouble()
+    variants["occupancy"] = m.occupancyVolume.toDouble()
+    out.meshVolume?.let { variants["mesh"] = it }
+    val s = out.stats
+    return ResultJson(
+        jobType = job.type.wire,
+        measures = Measures(
+            heightM = Estimate.exact(m.maxHeight.toDouble()),
+            volumeM3 = Estimate(m.volumeLow.toDouble(), m.volumeHigh.toDouble(), m.volumeRecommended.toDouble()),
+            volumeVariantsM3 = variants,
+            objectDims = ObjectDims(m.footprint.length.toDouble(), m.footprint.width.toDouble(), m.maxHeight.toDouble()),
+        ),
+        stats = ProcessingStats(
+            "phone", (System.nanoTime() - t0) / 1_000_000,
+            notes = listOf(
+                "quality=${q.name} voxel=${q.voxelSize * 1000f} mm",
+                "points: in=${s.input} box=${s.afterBox} support=${s.afterSupport} outliers=${s.afterOutliers} kept=${s.afterComponent}",
+                if (out.mesh == null) "mesh: not built" else "mesh: ${out.mesh.triangleCount} triangles",
+            ),
+        ),
+    )
 }
 
 /**

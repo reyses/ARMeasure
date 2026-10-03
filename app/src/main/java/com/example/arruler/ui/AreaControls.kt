@@ -3,6 +3,8 @@ package com.example.arruler.ui
 import android.view.HapticFeedbackConstants
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -71,7 +73,7 @@ fun BoxScope.AreaReadout(state: MeasureState) {
 }
 
 /**
- * Mode switch (DISTANCE | AREA | SHAPES | SCAN, the last only when depth is supported)| AREA) and, in AREA mode, the Close / Undo / Height pills. Sits above the
+ * Mode switch (DISTANCE | AREA | SHAPES | SCAN | OBJECT, the last two only when depth is supported) and, in AREA mode, the Close / Undo / Height pills. Sits above the
  * controls bar. Fires haptics, then the callbacks.
  */
 @Composable
@@ -109,12 +111,13 @@ fun BoxScope.AreaControls(
                 }
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             GlassPill("DISTANCE", Color.White, selected = appMode == AppMode.DISTANCE) { haptic(); onSetMode(AppMode.DISTANCE) }
             GlassPill("AREA", Color.White, selected = area) { haptic(); onSetMode(AppMode.AREA) }
             GlassPill("SHAPES", Color.White, selected = appMode == AppMode.SHAPES) { haptic(); onSetMode(AppMode.SHAPES) }
             if (scanAvailable) {
                 GlassPill("SCAN", Color.White, selected = appMode == AppMode.SCAN) { haptic(); onSetMode(AppMode.SCAN) }
+                GlassPill("OBJECT", Color.White, selected = appMode == AppMode.OBJECT) { haptic(); onSetMode(AppMode.OBJECT) }
             }
         }
     }

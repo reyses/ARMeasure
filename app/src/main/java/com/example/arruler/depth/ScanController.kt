@@ -2,7 +2,10 @@ package com.example.arruler.depth
 
 import com.example.arruler.geometry.Vec3
 import com.example.arruler.measure.MeasurePoint
+import com.example.arruler.objscan.TriMesh
+import com.example.arruler.processing.CloudData
 import com.example.arruler.scan3d.ScanSnapshot
+import com.example.arruler.scan3d.SnapshotPlane
 import com.google.ar.core.Frame
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -87,14 +90,12 @@ fun RoomModel.floorPolygon3d(): List<Vec3> = outline.points.map { Vec3(it.x, flo
 class ScanController(private val scope: CoroutineScope) {
 
     private val cloud = VoxelCloud()
-    private val sampler = DepthFrameSampler()
+    private val sampler = ThrottledDepthSampler(scope)
     private val lock = Mutex()
 
     @Volatile private var generation = 0
-    @Volatile private var sampleInFlight = false
     @Volatile private var previewInFlight = false
     @Volatile private var totalPoints = 0L
-    private var frameIndex = 0L
     private var lastPreviewMs = 0L
 
     private val _scanning = MutableStateFlow(false)
@@ -132,25 +133,13 @@ class ScanController(private val scope: CoroutineScope) {
     fun onFrame(frame: Frame, nowMs: Long) {
         val scanning = _scanning.value
         if (!scanning) return
-        frameIndex++
-        if (ScanLogic.shouldSample(frameIndex, ScanLogic.SAMPLE_EVERY_N_FRAMES, true, sampleInFlight)) {
-            val raw = sampler.acquire(frame)
-            if (raw != null) {
-                sampleInFlight = true
-                val gen = generation
-                scope.launch(Dispatchers.Default) {
-                    try {
-                        val sample = sampler.process(raw)
-                        lock.withLock {
-                            if (gen == generation) {
-                                cloud.addAll(sample.xyz, sample.count)
-                                totalPoints += sample.count
-                                _stats.value = ScanStats(cloud.count, totalPoints)
-                            }
-                        }
-                    } finally {
-                        sampleInFlight = false
-                    }
+        val sampleGen = generation
+        sampler.onFrame(frame) { sample ->
+            lock.withLock {
+                if (sampleGen == generation) {
+                    cloud.addAll(sample.xyz, sample.count)
+                    totalPoints += sample.count
+                    _stats.value = ScanStats(cloud.count, totalPoints)
                 }
             }
         }
@@ -179,6 +168,26 @@ class ScanController(private val scope: CoroutineScope) {
                 if (cloud.count == 0) return@withLock null
                 val planes = PlaneExtractor().extract(cloud.points(ScanLogic.ANALYZE_MIN_HITS))
                 ScanSnapshot.from(cloud, planes, RoomFromPlanes.build(planes), id, projectId)
+            }
+        }
+
+    /** The voxel cloud as an upload payload for a PC job (hits per voxel, confidence unknown = 255); null when empty. */
+    suspend fun cloudData(): CloudData? = withContext(Dispatchers.Default) {
+        lock.withLock {
+            if (cloud.count == 0) return@withLock null
+            val pts = cloud.points(ScanLogic.ANALYZE_MIN_HITS)
+            val n = pts.size / 3
+            if (n == 0) return@withLock null
+            CloudData(pts, IntArray(n) { cloud.hitsAt(pts[it * 3], pts[it * 3 + 1], pts[it * 3 + 2]) }, IntArray(n) { 255 })
+        }
+    }
+
+    /** Snapshot with planes (and optionally a mesh) computed elsewhere, e.g. by the PC; no local plane extraction. */
+    suspend fun snapshotWith(id: String, projectId: String?, planes: List<SnapshotPlane>, mesh: TriMesh?): ScanSnapshot? =
+        withContext(Dispatchers.Default) {
+            lock.withLock {
+                if (cloud.count == 0) return@withLock null
+                ScanSnapshot.fromSnapshotPlanes(cloud, planes, null, id, projectId, mesh = mesh)
             }
         }
 

@@ -66,7 +66,8 @@ dependencies {
 
     // PC processing link
     implementation libs.okhttp
-    implementation libs.androidx.security.crypto
+    // QR pairing: Google code scanner (own activity, no camera permission, no CameraX)
+    implementation libs.play.services.code.scanner
 
     // Testing
     testImplementation libs.junit

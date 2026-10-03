@@ -129,30 +129,37 @@ interface PairingStore {
     fun clear()
 }
 
-/** Url + token in EncryptedSharedPreferences; falls back to plain SharedPreferences if it cannot be created. */
-class AndroidPairingStore(context: Context) : PairingStore {
-    private val prefs: SharedPreferences = try {
-        val app = context.applicationContext
-        val key = androidx.security.crypto.MasterKey.Builder(app)
-            .setKeyScheme(androidx.security.crypto.MasterKey.KeyScheme.AES256_GCM).build()
-        androidx.security.crypto.EncryptedSharedPreferences.create(
-            app, "pc_pairing_enc", key,
-            androidx.security.crypto.EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            androidx.security.crypto.EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
-    } catch (e: Exception) {
-        // TODO: surface this to the user; the token is stored unencrypted when the keystore is unusable.
-        context.applicationContext.getSharedPreferences("pc_pairing_plain", Context.MODE_PRIVATE)
-    }
+/**
+ * Pairing in plain SharedPreferences "pc_pairing": url and name as text, the token only as an AES/GCM
+ * frame ([TokenFraming]) made with the Android Keystore key [KeystoreTokenCipher.ALIAS]. If the key is
+ * unusable [save] throws instead of storing the token in the clear, and [load] reports unpaired (and
+ * forgets the entry) when the stored token can no longer be decrypted.
+ */
+class AndroidPairingStore(
+    context: Context,
+    private val cipher: TokenCipher = KeystoreTokenCipher(),
+) : PairingStore {
+    private val prefs: SharedPreferences =
+        context.applicationContext.getSharedPreferences("pc_pairing", Context.MODE_PRIVATE)
 
     override fun load(): PairingInfo? {
         val url = prefs.getString("url", null) ?: return null
-        val token = prefs.getString("token", null) ?: return null
+        val framed = prefs.getString("token_enc", null) ?: return null
+        val token = cipher.decrypt(framed)
+        if (token == null) {
+            clear()
+            return null
+        }
         return PairingInfo(1, url, token, prefs.getString("name", "") ?: "")
     }
 
     override fun save(info: PairingInfo) {
-        prefs.edit().putString("url", info.url).putString("token", info.token).putString("name", info.name).apply()
+        val framed = try {
+            cipher.encrypt(info.token)
+        } catch (e: Exception) {
+            throw IllegalStateException("Secure storage (Android Keystore) is unavailable: ${e.message}", e)
+        }
+        prefs.edit().putString("url", info.url).putString("token_enc", framed).putString("name", info.name).apply()
     }
 
     override fun clear() { prefs.edit().clear().apply() }

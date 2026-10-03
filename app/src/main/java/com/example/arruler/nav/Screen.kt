@@ -4,6 +4,7 @@ package com.example.arruler.nav
 sealed interface Screen {
     data object Measure : Screen
     data object Projects : Screen
+    data object Settings : Screen
     data class Plan(val projectId: String) : Screen
     data class Scan3D(val scanId: String) : Screen
 }

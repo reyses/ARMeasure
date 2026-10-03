@@ -44,7 +44,10 @@ object ScanShare {
         val safe = ScanFiles.dir(root, id).name
         val out = File(dir, "scan_${safe}.${format.ext}")
         when (format) {
-            ScanExport.PLY -> File(ScanFiles.dir(root, id), ScanFiles.PLY_NAME).takeIf { it.exists() }?.copyTo(out, overwrite = true) ?: return false
+            ScanExport.PLY -> (
+                File(ScanFiles.dir(root, id), ScanFiles.MESH_NAME).takeIf { it.exists() }
+                    ?: File(ScanFiles.dir(root, id), ScanFiles.PLY_NAME).takeIf { it.exists() }
+                )?.copyTo(out, overwrite = true) ?: return false
             ScanExport.JSON -> File(ScanFiles.dir(root, id), ScanFiles.JSON_NAME).takeIf { it.exists() }?.copyTo(out, overwrite = true) ?: return false
             ScanExport.OBJ -> ScanFiles.exportObj(ScanFiles.load(root, id) ?: return false, out)
         }
@@ -83,7 +86,8 @@ fun ScanListSection(
                 Column(Modifier.padding(12.dp)) {
                     Text(fmt.format(Date(s.createdAt)), style = MaterialTheme.typography.bodyLarge)
                     Text(
-                        "${s.pointCount} points" + (s.roomAreaM2?.let { "  |  room %.1f m2".format(Locale.US, it) } ?: ""),
+                        "${s.pointCount} points" + (s.roomAreaM2?.let { "  |  room %.1f m2".format(Locale.US, it) } ?: "") +
+                            (if (s.kind == ScanSnapshot.KIND_OBJECT) "  |  object" + (s.objectVolumeM3?.let { " %.4f m3".format(Locale.US, it) } ?: "") else ""),
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Row(verticalAlignment = Alignment.CenterVertically) {

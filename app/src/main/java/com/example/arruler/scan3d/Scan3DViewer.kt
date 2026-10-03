@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.arruler.depth.PlaneKind
 import com.example.arruler.geometry.ColorRamp
+import com.example.arruler.objscan.TriMesh
 import com.google.android.filament.Box as FilamentBox
 import com.google.android.filament.Engine
 import com.google.android.filament.MaterialInstance
@@ -122,6 +123,21 @@ private fun tetraGeometry(engine: Engine, s: ScanSnapshot, idx: IntArray): Geome
     return Geometry.Builder(PrimitiveType.TRIANGLES).vertices(verts).indices(ind).build(engine)
 }
 
+/** Indexed triangle mesh of an object scan, lit by SceneView's default light (outward counter-clockwise triangles). */
+private fun meshGeometry(engine: Engine, m: TriMesh): Geometry {
+    val verts = ArrayList<Geometry.Vertex>(m.vertexCount)
+    for (i in 0 until m.vertexCount) {
+        verts += Geometry.Vertex(
+            position = Float3(m.vertices[i * 3], m.vertices[i * 3 + 1], m.vertices[i * 3 + 2]),
+            normal = Float3(m.normals[i * 3], m.normals[i * 3 + 1], m.normals[i * 3 + 2]),
+            uvCoordinate = Float2(0f, 0f),
+        )
+    }
+    val ind = ArrayList<Int>(m.indices.size)
+    for (i in m.indices) ind += i
+    return Geometry.Builder(PrimitiveType.TRIANGLES).vertices(verts).indices(ind).build(engine)
+}
+
 /** Fan-triangulated polygon, both windings (so the fill shows from either side regardless of culling). */
 private fun planeGeometry(engine: Engine, p: SnapshotPlane): Geometry {
     val n = p.vertexCount
@@ -191,6 +207,22 @@ fun Scan3DViewer(snapshot: ScanSnapshot, onBack: () -> Unit, modifier: Modifier 
                     }
                 }
                 if (showSurfaces) {
+                    snapshot.mesh?.let { mesh ->
+                        key("mesh") {
+                            val geo = remember(snapshot) { meshGeometry(engine, mesh) }
+                            // colour by kind: an object is "other" (grey)
+                            val mat = remember(materialLoader) {
+                                materialLoader.createColorInstance(0xFF000000.toInt() or KindColors.rgb(PlaneKind.OTHER), 0f, 0.6f, 0.5f)
+                            }
+                            MeshNode(
+                                primitiveType = geo.primitiveType,
+                                vertexBuffer = geo.vertexBuffer,
+                                indexBuffer = geo.indexBuffer,
+                                boundingBox = geo.boundingBox,
+                                materialInstance = mat,
+                            )
+                        }
+                    }
                     for ((pi, p) in snapshot.planes.withIndex()) {
                         if (p.vertexCount < 3) continue
                         key(pi) {
@@ -217,7 +249,8 @@ fun Scan3DViewer(snapshot: ScanSnapshot, onBack: () -> Unit, modifier: Modifier 
             Pill { TextButton(onClick = onBack) { Text("Back", color = Color.White) } }
             Pill {
                 Text(
-                    "${snapshot.pointCount} points" + (snapshot.room?.let { "  |  %.1f m2".format(java.util.Locale.US, it.areaM2) } ?: ""),
+                    "${snapshot.pointCount} points" + (snapshot.room?.let { "  |  %.1f m2".format(java.util.Locale.US, it.areaM2) } ?: "") +
+                        (snapshot.mesh?.let { "  |  ${it.triangleCount} triangles" } ?: ""),
                     color = Color.White, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                 )
             }
@@ -230,7 +263,7 @@ fun Scan3DViewer(snapshot: ScanSnapshot, onBack: () -> Unit, modifier: Modifier 
             Legend(mode, snapshot)
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(showPoints, { showPoints = !showPoints }, { Text("Points") })
-                FilterChip(showSurfaces, { showSurfaces = !showSurfaces }, { Text("Surfaces") })
+                FilterChip(showSurfaces, { showSurfaces = !showSurfaces }, { Text(if (snapshot.mesh != null) "Mesh" else "Surfaces") })
                 FilterChip(
                     mode == ColourMode.QUALITY,
                     { mode = if (mode == ColourMode.QUALITY) ColourMode.KIND else ColourMode.QUALITY },
@@ -278,7 +311,7 @@ private fun Legend(mode: ColourMode, s: ScanSnapshot) {
             }
         }
         Text(
-            "${s.planes.size} surfaces found. Drag to orbit, two fingers to pan, pinch to zoom.",
+            (if (s.mesh != null) "Object mesh." else "${s.planes.size} surfaces found.") + " Drag to orbit, two fingers to pan, pinch to zoom.",
             color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp, style = MaterialTheme.typography.bodySmall,
         )
     }

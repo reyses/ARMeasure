@@ -1,12 +1,17 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <!--
-  Wiring (NOT yet applied): add to <application> in AndroidManifest.xml
-      android:networkSecurityConfig="@xml/network_security_config"
+  Applied from AndroidManifest.xml (<application android:networkSecurityConfig>).
 
-  Android cannot express CIDR ranges here, so the platform-level cleartext switch is on and the
-  real rule (https anywhere; http only to 10/8, 172.16/12, 192.168/16 IPv4 literals) is enforced in
-  processing/PcLink.kt (UrlPolicy + an OkHttp interceptor that rejects everything else).
-  Without this file targetSdk 37 blocks all http, i.e. the LAN mode.
+  Why cleartext is permitted at platform level: the PC link supports plain http on the LAN (a self-signed
+  https certificate is not trusted), and Android's network security config cannot express IP ranges
+  (a domain-config only matches a host name or one exact IP literal, never 192.168.0.0/16). Without
+  cleartext here, targetSdk 37 would block every http request, i.e. the whole LAN mode.
+
+  The real rule is enforced in code, not here: processing/PcLink.kt (UrlPolicy + an OkHttp interceptor)
+  allows https anywhere and plain http ONLY to IPv4 literals in 10/8, 172.16/12 and 192.168/16, refuses
+  everything else and does not follow redirects. HttpPcLink (OkHttp) is the only plain-http client in the
+  app; ARCore, SceneView and the Google code scanner use https only. So the platform flag is deliberately
+  loose and UrlPolicy is the enforcement.
 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="true">

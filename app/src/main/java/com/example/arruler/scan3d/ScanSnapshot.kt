@@ -4,6 +4,7 @@ import com.example.arruler.depth.ExtractedPlane
 import com.example.arruler.depth.PlaneKind
 import com.example.arruler.depth.RoomModel
 import com.example.arruler.depth.VoxelCloud
+import com.example.arruler.objscan.TriMesh
 import kotlin.math.abs
 
 /** A detected plane in world space (meters, +Y up): unit normal, `n . p = d`, outline polygon as packed xyz. */
@@ -75,6 +76,11 @@ class ScanSnapshot(
     val quality: FloatArray,
     val planes: List<SnapshotPlane>,
     val room: SnapshotRoom?,
+    /** Triangle mesh of an object scan (world frame), null for room scans. */
+    val mesh: TriMesh? = null,
+    /** [KIND_ROOM] or [KIND_OBJECT]. */
+    val kind: String = KIND_ROOM,
+    val objectSummary: ObjectSummary? = null,
 ) {
     init {
         require(points.size % 3 == 0) { "points must be packed xyz" }
@@ -100,7 +106,7 @@ class ScanSnapshot(
 
     /** Axis-aligned bounds as (minX, minY, minZ, maxX, maxY, maxZ), or null when empty. */
     fun bounds(): FloatArray? {
-        if (pointCount == 0 && planes.isEmpty()) return null
+        if (pointCount == 0 && planes.isEmpty() && mesh == null) return null
         val b = floatArrayOf(Float.MAX_VALUE, Float.MAX_VALUE, Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE)
         fun add(x: Float, y: Float, z: Float) {
             if (x < b[0]) b[0] = x
@@ -112,11 +118,14 @@ class ScanSnapshot(
         }
         for (i in 0 until pointCount) add(points[i * 3], points[i * 3 + 1], points[i * 3 + 2])
         for (p in planes) for (i in 0 until p.vertexCount) add(p.outline[i * 3], p.outline[i * 3 + 1], p.outline[i * 3 + 2])
+        mesh?.let { m -> for (i in 0 until m.vertexCount) add(m.vertices[i * 3], m.vertices[i * 3 + 1], m.vertices[i * 3 + 2]) }
         return b
     }
 
     companion object {
         const val PLANE_BAND_M = 0.03f
+        const val KIND_ROOM = "room"
+        const val KIND_OBJECT = "object"
 
         /**
          * Builds a snapshot from the live [cloud]. Voxels with at least [minHits] hits are kept (default 1 so
@@ -134,6 +143,22 @@ class ScanSnapshot(
             minHits: Int = 1,
             maxPoints: Int = 200_000,
             confidence: FloatArray? = null,
+        ): ScanSnapshot = fromSnapshotPlanes(
+            cloud, planes.map(SnapshotPlane::from), room?.let(SnapshotRoom::from), id, projectId, createdAt, minHits, maxPoints, confidence,
+        )
+
+        /** Same as [from] with the planes and room already in snapshot form (e.g. read from a PC result). */
+        fun fromSnapshotPlanes(
+            cloud: VoxelCloud,
+            planes: List<SnapshotPlane>,
+            room: SnapshotRoom?,
+            id: String,
+            projectId: String? = null,
+            createdAt: Long = System.currentTimeMillis(),
+            minHits: Int = 1,
+            maxPoints: Int = 200_000,
+            confidence: FloatArray? = null,
+            mesh: TriMesh? = null,
         ): ScanSnapshot {
             val all = cloud.points(minHits)
             val n = all.size / 3
@@ -148,7 +173,7 @@ class ScanSnapshot(
             }
             require(confidence == null || confidence.size == take) { "confidence needs one value per kept point" }
             val q = FloatArray(take) { Quality.of(hits[it], confidence?.get(it)) }
-            return ScanSnapshot(id, projectId, createdAt, pts, q, planes.map(SnapshotPlane::from), room?.let(SnapshotRoom::from))
+            return ScanSnapshot(id, projectId, createdAt, pts, q, planes, room, mesh)
         }
     }
 }
@@ -188,3 +213,13 @@ object KindColors {
         PlaneKind.OTHER -> "other"
     }
 }
+
+/** Headline numbers of an object scan, stored with it so the project list can show them (meters, m^3). */
+data class ObjectSummary(
+    val lengthM: Float,
+    val widthM: Float,
+    val heightM: Float,
+    val volumeLowM3: Float,
+    val volumeHighM3: Float,
+    val volumeM3: Float,
+)

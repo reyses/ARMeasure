@@ -51,7 +51,7 @@ class ObjectScanTest {
         // box yawed 15 deg off the object: the oriented rectangle still finds 0.5 x 0.3
         val r2 = Fixtures.run(s, Fixtures.userBox(0.5f, 0.3f, 0.4f, 15f, 0.06f), ObjectQuality.QUICK)
         assertEquals(0.5f, r2.m!!.footprint.length, 0.012f)
-        assertEquals(0.3f, r2.m!!.footprint.width, 0.012f)
+        assertEquals(0.3f, r2.m.footprint.width, 0.012f)
     }
 
     private fun checkBox(r: Fixtures.Result, l: Float, w: Float, h: Float, tol: Float, hullTol: Double) {
@@ -104,8 +104,8 @@ class ObjectScanTest {
         dump("cyl10", r)
         val v = PI * 0.1 * 0.1 * 0.2
         assertEquals(v, r.m!!.hullVolume.toDouble(), v * 0.10)
-        assertEquals(0.2f, r.m!!.footprint.length, 0.01f)
-        assertEquals(0.2f, r.m!!.maxHeight, 0.008f)
+        assertEquals(0.2f, r.m.footprint.length, 0.01f)
+        assertEquals(0.2f, r.m.maxHeight, 0.008f)
     }
 
     // ---------- marching cubes ----------

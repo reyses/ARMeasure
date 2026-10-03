@@ -36,6 +36,10 @@ class ArRenderer {
     private var extras by mutableStateOf<List<Segment>>(emptyList())
     private var cloud by mutableStateOf<List<MeasurePoint>>(emptyList())
     private var surfaces by mutableStateOf<List<SurfacePatch>>(emptyList())
+    private var dome by mutableStateOf<List<DomeMarker>>(emptyList())
+
+    /** One coverage-dome marker: world position and whether its viewing direction was observed. */
+    internal class DomeMarker(val position: Float3, val observed: Boolean)
 
     /** One plane polygon ready to emit: its node frame, alpha bucket and world outline. */
     private class PatchNodeData(
@@ -70,6 +74,16 @@ class ArRenderer {
     }
 
     /**
+     * OBJECT mode coverage dome: one small sphere per viewing-direction bin at [radiusM] around [centre]
+     * (green = observed, grey = not yet). Empty list removes them.
+     */
+    fun renderDome(centre: MeasurePoint, bins: List<Pair<MeasurePoint, Boolean>>, radiusM: Float) {
+        dome = bins.map { (dir, observed) ->
+            DomeMarker(Float3(centre.x + dir.x * radiusM, centre.y + dir.y * radiusM, centre.z + dir.z * radiusM), observed)
+        }
+    }
+
+    /**
      * SURFACES overlay: every [patches] entry as a translucent filled polygon with an outline, nodes
      * reused per [SurfacePatch.id]; patches missing from the list lose their nodes. Empty removes all.
      */
@@ -82,6 +96,7 @@ class ArRenderer {
         render(emptyList())
         renderExtra(emptyList())
         renderCloud(emptyList())
+        dome = emptyList()
     }
 
     fun release() {
@@ -105,6 +120,12 @@ class ArRenderer {
         val cloudMaterial = remember(materialLoader) {
             materialLoader.createColorInstance(Color.CYAN, 0f, 0.4f, 0.5f)
         }
+        val domeSeen = remember(materialLoader) {
+            materialLoader.createColorInstance(Color.rgb(52, 199, 89), 0f, 0.4f, 0.5f)
+        }
+        val domeIdle = remember(materialLoader) {
+            materialLoader.createColorInstance(Color.GRAY, 0f, 0.4f, 0.5f)
+        }
         // Unlit translucent fills per kind x alpha bucket, opaque outlines per kind.
         val fillMaterials = remember(materialLoader) {
             SurfaceKind.values().associateWith { kind ->
@@ -124,6 +145,8 @@ class ArRenderer {
                 materialLoader.destroyMaterialInstance(liveMaterial)
                 materialLoader.destroyMaterialInstance(finalMaterial)
                 materialLoader.destroyMaterialInstance(cloudMaterial)
+                materialLoader.destroyMaterialInstance(domeSeen)
+                materialLoader.destroyMaterialInstance(domeIdle)
             }
         }
 
@@ -179,6 +202,15 @@ class ArRenderer {
                 )
             }
         }
+        dome.forEachIndexed { i, m ->
+            key("d$i") {
+                SphereNode(
+                    radius = DOME_RADIUS,
+                    materialInstance = if (m.observed) domeSeen else domeIdle,
+                    position = m.position,
+                )
+            }
+        }
         cloud.forEachIndexed { i, p ->
             key("c$i") {
                 SphereNode(
@@ -208,6 +240,7 @@ class ArRenderer {
         const val LIVE_RADIUS = 0.003f
         const val FINAL_RADIUS = 0.005f
         const val CLOUD_RADIUS = 0.005f
+        const val DOME_RADIUS = 0.012f
 
         /** Sphere-node budget of the scan preview (500 rather than 2,000: each is a Filament entity). */
         const val MAX_CLOUD_POINTS = 500

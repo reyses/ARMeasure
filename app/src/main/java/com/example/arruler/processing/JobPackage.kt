@@ -1,5 +1,7 @@
 package com.example.arruler.processing
 
+import com.example.arruler.objscan.ObjectBox
+import com.example.arruler.objscan.SupportPlane
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -35,6 +37,18 @@ data class CoordinateConvention(
     @SerialName("camera_axes") val cameraAxes: String = "OpenGL: +X right, +Y up, camera looks along -Z"
 )
 
+/** `{"center":[x,y,z],"size":[w,h,d],"yaw_deg":..}`: world = Ry(yaw_deg) * local + center, center = middle of the volume. */
+@Serializable
+data class BoxSpec(
+    val center: List<Float>,
+    val size: List<Float>,
+    @SerialName("yaw_deg") val yawDeg: Float,
+)
+
+/** Support plane as the server reads it: n.p + d = 0. */
+@Serializable
+data class SupportPlaneSpec(val normal: List<Float>, val d: Float)
+
 @Serializable
 data class JobManifest(
     val schema: Int = JobPackage.SCHEMA,
@@ -46,6 +60,9 @@ data class JobManifest(
     val coordinates: CoordinateConvention = CoordinateConvention(),
     val quality: String? = null,
     @SerialName("voxel_mm") val voxelMm: Int? = null,
+    /** Object jobs: the box the user placed and the support plane (the PC crops and removes the table with them). */
+    val box: BoxSpec? = null,
+    @SerialName("support_plane") val supportPlane: SupportPlaneSpec? = null,
     @SerialName("point_count") val pointCount: Int = 0,
     @SerialName("image_count") val imageCount: Int = 0,
     val files: List<String> = emptyList()
@@ -56,7 +73,9 @@ data class PackageMeta(
     val appVersion: String,
     val created: String,
     val device: DeviceSummary? = null,
-    val quality: ObjectQuality? = null
+    val quality: ObjectQuality? = null,
+    val box: ObjectBox? = null,
+    val supportPlane: SupportPlane? = null,
 )
 
 /** Point payload: x y z in meters, voxel hit count (0..65535) and confidence (0..255). */
@@ -187,6 +206,7 @@ object JobPackage {
         val manifest = JobManifest(
             jobType = type.wire, appVersion = meta.appVersion, created = meta.created, device = meta.device,
             quality = meta.quality?.name, voxelMm = meta.quality?.voxelMm,
+            box = meta.box?.toSpec(), supportPlane = meta.supportPlane?.toSpec(),
             pointCount = cloud.count, files = listOf(CLOUD)
         )
         ZipOutputStream(dest.outputStream().buffered()).use { z ->
@@ -251,3 +271,12 @@ object JobPackage {
         JobPackageContents(m, cloud, poses, images)
     }
 }
+
+/** The box in the manifest convention ([BoxSpec]): centre of the volume, size [w, h, d], yaw in degrees. */
+fun ObjectBox.toSpec(): BoxSpec {
+    val c = volumeCentre()
+    return BoxSpec(listOf(c.x, c.y, c.z), listOf(w, h, d), Math.toDegrees(yaw.toDouble()).toFloat())
+}
+
+/** Our plane is n.p = d; the server wants n.p + d = 0. */
+fun SupportPlane.toSpec(): SupportPlaneSpec = SupportPlaneSpec(listOf(normal.x, normal.y, normal.z), -d)

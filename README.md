@@ -7,6 +7,8 @@ A production-ready AR ruler application optimized for Android flagship devices, 
 - Area and volume: tap a polygon outline, close it, add a ceiling height
 - Shapes: box, cylinder, cone, sphere, frustum and pile volume and surface area from a few taps
 - Scan (devices with ARCore depth): sweep a room, get area, perimeter, height, volume and wall count
+- Object (devices with ARCore depth): place a box on the floor or a table, circle the object with a coverage dome as guide, get footprint, height and volume with a range, plus a 3D mesh to view, share (OBJ, PLY) and save
+- PC processing: pair your PC with a QR code (Settings), then big scans and fine object meshes run on the PC (Auto, Phone or PC in Settings)
 - Projects: save rooms into projects, view the floor plan, export it
 - Recording and playback of AR sessions (MP4 datasets)
 

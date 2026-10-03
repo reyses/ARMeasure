@@ -122,7 +122,7 @@ data class DeviceProfile(
             val app = context.applicationContext
             val am = app.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
             val mi = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
-            val soc = if (Build.VERSION.SDK_INT >= 31) Build.SOC_MODEL ?: "" else ""
+            val soc = if (Build.VERSION.SDK_INT >= 31) Build.SOC_MODEL else ""
             val pc = if (Build.VERSION.SDK_INT >= 31) Build.VERSION.MEDIA_PERFORMANCE_CLASS else 0
             val bench = if (useBenchmark) benchmarkMs(app) else cachedBenchMs(app)
             val signals = DeviceSignals(pc, mi.totalMem, am.isLowRamDevice, Runtime.getRuntime().availableProcessors(), soc, bench)
@@ -141,6 +141,12 @@ data class DeviceProfile(
         private fun versionCode(app: Context): Long {
             val info = app.packageManager.getPackageInfo(app.packageName, 0)
             return if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else @Suppress("DEPRECATION") info.versionCode.toLong()
+        }
+
+        /** Drops the cached benchmark so the next [read] with `useBenchmark = true` measures again (Settings: Run speed test). */
+        fun forgetBenchmark(context: Context) {
+            context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .remove("bench_version").remove("bench_ms").apply()
         }
 
         fun cachedBenchMs(app: Context): Long? {

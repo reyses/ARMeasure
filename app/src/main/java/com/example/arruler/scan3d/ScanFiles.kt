@@ -30,6 +30,18 @@ internal data class RoomDto(
 )
 
 @Serializable
+internal data class ObjectSummaryDto(
+    val lengthM: Float,
+    val widthM: Float,
+    val heightM: Float,
+    val volumeLowM3: Float,
+    val volumeHighM3: Float,
+    val volumeM3: Float,
+) {
+    fun toSummary() = ObjectSummary(lengthM, widthM, heightM, volumeLowM3, volumeHighM3, volumeM3)
+}
+
+@Serializable
 internal data class ScanMetaDto(
     val id: String,
     val projectId: String? = null,
@@ -38,6 +50,8 @@ internal data class ScanMetaDto(
     val planes: List<PlaneDto> = emptyList(),
     val room: RoomDto? = null,
     val schema: Int = 1,
+    val kind: String = ScanSnapshot.KIND_ROOM,
+    val objectSummary: ObjectSummaryDto? = null,
 )
 
 /** One saved scan as listed in the UI. */
@@ -47,6 +61,8 @@ data class ScanInfo(
     val createdAt: Long,
     val pointCount: Int,
     val roomAreaM2: Float?,
+    val kind: String = ScanSnapshot.KIND_ROOM,
+    val objectVolumeM3: Float? = null,
 )
 
 /**
@@ -60,6 +76,7 @@ object ScanFiles {
     const val PLY_NAME = "cloud.ply"
     const val JSON_NAME = "planes.json"
     const val OBJ_NAME = "surfaces.obj"
+    const val MESH_NAME = "mesh.ply"
     const val BYTES_PER_POINT = 3 * 4 + 3 + 4
 
     private val json = Json { prettyPrint = true; encodeDefaults = true; ignoreUnknownKeys = true }
@@ -72,6 +89,7 @@ object ScanFiles {
         val d = dir(root, s.id)
         if (!d.isDirectory && !d.mkdirs()) throw IOException("cannot create $d")
         writeAtomic(File(d, PLY_NAME), plyBytes(s))
+        s.mesh?.let { writeAtomic(File(d, MESH_NAME), it.toBinaryPly()) }
         writeAtomic(File(d, JSON_NAME), json.encodeToString(ScanMetaDto.serializer(), meta(s)).toByteArray(Charsets.UTF_8))
         return d
     }
@@ -85,6 +103,8 @@ object ScanFiles {
                 m.id, m.projectId, m.createdAt, pts, q,
                 m.planes.map { SnapshotPlane(PlaneKind.valueOf(it.kind), it.normal[0], it.normal[1], it.normal[2], it.d, it.outline.toFloatArray(), it.inliers) },
                 m.room?.let { SnapshotRoom(it.outlineXZ.toFloatArray(), it.floorY, it.ceilingY, it.wallCount) },
+                File(d, MESH_NAME).takeIf { it.isFile }?.let { MeshIo.readPly(it.readBytes()) },
+                m.kind, m.objectSummary?.toSummary(),
             )
         } catch (_: Exception) {
             null
@@ -98,7 +118,7 @@ object ScanFiles {
             try {
                 val m = json.decodeFromString(ScanMetaDto.serializer(), File(d, JSON_NAME).readText(Charsets.UTF_8))
                 val area = m.room?.let { SnapshotRoom(it.outlineXZ.toFloatArray(), it.floorY, it.ceilingY, it.wallCount).areaM2 }
-                ScanInfo(m.id, m.projectId, m.createdAt, m.pointCount, area)
+                ScanInfo(m.id, m.projectId, m.createdAt, m.pointCount, area, m.kind, m.objectSummary?.volumeM3)
             } catch (_: Exception) {
                 null
             }
@@ -109,8 +129,10 @@ object ScanFiles {
 
     private fun meta(s: ScanSnapshot) = ScanMetaDto(
         s.id, s.projectId, s.createdAt, s.pointCount,
-        s.planes.map { PlaneDto(it.kind.name, listOf(it.nx, it.ny, it.nz), it.d, it.outline.toList(), it.inlierCount) },
-        s.room?.let { RoomDto(it.outlineXZ.toList(), it.floorY, it.ceilingY, it.wallCount) },
+        planes = s.planes.map { PlaneDto(it.kind.name, listOf(it.nx, it.ny, it.nz), it.d, it.outline.toList(), it.inlierCount) },
+        room = s.room?.let { RoomDto(it.outlineXZ.toList(), it.floorY, it.ceilingY, it.wallCount) },
+        kind = s.kind,
+        objectSummary = s.objectSummary?.let { ObjectSummaryDto(it.lengthM, it.widthM, it.heightM, it.volumeLowM3, it.volumeHighM3, it.volumeM3) },
     )
 
     // ---- PLY ----
@@ -171,6 +193,7 @@ object ScanFiles {
      * than 3 outline vertices are skipped.
      */
     fun objText(s: ScanSnapshot): String {
+        s.mesh?.let { return it.toObj("object") }
         val sb = StringBuilder()
         sb.append("# ARMeasure scan ").append(s.id).append(" - planes, meters, +Y up\n")
         var base = 0

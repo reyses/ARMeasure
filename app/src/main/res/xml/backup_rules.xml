@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
-    <!-- Exclude all files by default -->
+    <!-- The PC pairing token is encrypted with a device-bound Keystore key that never leaves the phone,
+         so a restored copy could not be decrypted anyway. -->
+    <exclude domain="sharedpref" path="pc_pairing.xml" />
 </full-backup-content>

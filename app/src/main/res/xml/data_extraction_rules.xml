@@ -3,4 +3,7 @@
     <cloud-backup>
         <exclude domain="root" />
     </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="pc_pairing.xml" />
+    </device-transfer>
 </data-extraction-rules>
