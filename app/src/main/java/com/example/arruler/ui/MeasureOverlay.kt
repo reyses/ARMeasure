@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.arruler.DistanceFormatter
 import com.example.arruler.R
+import com.example.arruler.measure.MeasureMode
 import com.example.arruler.measure.MeasureState
 import com.example.arruler.measure.Phase
 
@@ -58,6 +59,7 @@ fun BoxScope.MeasureOverlay(state: MeasureState, hasSurface: Boolean) {
     )
 
     val reticleText = when {
+        state.mode == MeasureMode.AREA -> areaHint(state, hasSurface)
         state.phase == Phase.MEASURING -> distanceText
         state.phase == Phase.FINISHED -> "Tap to Measure Again"
         hasSurface -> "Tap to Start"
@@ -77,7 +79,9 @@ fun BoxScope.MeasureOverlay(state: MeasureState, hasSurface: Boolean) {
         }
     }
 
-    if (state.lengthMeters > 0) {
+    AreaReadout(state)
+
+    if (state.mode == MeasureMode.DISTANCE && state.lengthMeters > 0) {
         Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)

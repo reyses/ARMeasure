@@ -25,6 +25,7 @@ class ArRenderer(private val arView: ARSceneView) {
 
     private val pointNodes = ArrayList<Node>()
     private val segmentNodes = ArrayList<Node>()
+    private val extraNodes = ArrayList<Node>()
     private var segmentsAreFinal: Boolean? = null
 
     /**
@@ -36,7 +37,21 @@ class ArRenderer(private val arView: ARSceneView) {
         syncSegments(points, closed, final)
     }
 
-    fun clear() = render(emptyList())
+    /** Extra thin segments (e.g. the height line), independent of [render]. Empty list removes them. */
+    fun renderExtra(segments: List<Pair<MeasurePoint, MeasurePoint>>) {
+        trim(extraNodes, segments.size)
+        while (extraNodes.size < segments.size) {
+            val node = CylinderNode(engine, radius = 1f, height = 1f, materialInstance = liveMaterial)
+            arView.addChildNode(node)
+            extraNodes += node
+        }
+        segments.forEachIndexed { i, (a, b) -> placeSegment(extraNodes[i], a, b, LIVE_RADIUS) }
+    }
+
+    fun clear() {
+        render(emptyList())
+        renderExtra(emptyList())
+    }
 
     fun release() {
         clear()

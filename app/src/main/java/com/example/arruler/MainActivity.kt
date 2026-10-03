@@ -19,8 +19,11 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.example.arruler.ar.ArRenderer
 import com.example.arruler.ar.ArSessionController
 import com.example.arruler.databinding.ActivityMainBinding
+import com.example.arruler.measure.MeasureMode
+import com.example.arruler.measure.MeasureState
 import com.example.arruler.measure.MeasurementSession
 import com.example.arruler.measure.Phase
+import com.example.arruler.ui.AreaControls
 import com.example.arruler.ui.ControlsBar
 import com.example.arruler.ui.MeasureOverlay
 import kotlinx.coroutines.launch
@@ -47,7 +50,7 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 session.state.collect { s ->
-                    renderer.render(s.displayPoints, final = s.phase == Phase.FINISHED)
+                    renderMeasureState(s)
                 }
             }
         }
@@ -64,6 +67,7 @@ class MainActivity : AppCompatActivity() {
                         onMainButton = ::onMainButton,
                         onClear = ::clearAll,
                     )
+                    AreaControls(state, ::onSetMode, ::onAreaClose, ::onAreaUndo, ::onAreaHeight)
                 }
             }
         }
@@ -76,6 +80,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onArFrame() {
+        areaFrame()
         if (session.state.value.phase == Phase.MEASURING) {
             ar.hitTestCenter()?.let { session.setLive(it.point) }
         }
@@ -83,6 +88,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun onArTap(x: Float, y: Float) {
         val s = session.state.value
+        if (s.mode == MeasureMode.AREA) return
         if (s.phase != Phase.MEASURING || s.points.isEmpty()) return
         val hit = ar.hitTest(x, y) ?: return
         haptic()
@@ -90,6 +96,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onMainButton() {
+        if (session.state.value.mode == MeasureMode.AREA) return onAreaShutter()
         if (session.state.value.phase == Phase.MEASURING) {
             session.stop()
             return
@@ -104,6 +111,50 @@ class MainActivity : AppCompatActivity() {
         ar.releaseAnchors()
         session.clear()
     }
+
+    // ---- AREA mode (additive) ----
+
+    private fun renderMeasureState(s: MeasureState) {
+        if (s.mode == MeasureMode.AREA) {
+            renderer.render(s.displayPoints, closed = s.closed, final = s.closed)
+            val hp = s.heightPoint
+            val area = s.areaMeasurement
+            renderer.renderExtra(if (s.closed && hp != null && area != null) listOf(area.centroid() to hp) else emptyList())
+        } else {
+            renderer.render(s.displayPoints, final = s.phase == Phase.FINISHED)
+            renderer.renderExtra(emptyList())
+        }
+    }
+
+    private fun areaFrame() {
+        val s = session.state.value
+        if (s.mode == MeasureMode.AREA && s.heightActive) {
+            ar.hitTestCenter()?.let { session.setHeightLive(it.point) }
+        }
+    }
+
+    private fun onSetMode(mode: MeasureMode) {
+        if (session.state.value.mode == mode) return
+        clearAll()
+        session.setMode(mode)
+    }
+
+    private fun onAreaShutter() {
+        val s = session.state.value
+        val hit = ar.hitTestCenter() ?: return
+        when {
+            s.heightActive -> { haptic(); session.commitHeight(ar.createAnchor(hit)) }
+            s.closed -> { clearAll(); haptic(); session.start(ar.createAnchor(hit)) }
+            s.phase == Phase.MEASURING && s.points.isNotEmpty() -> { haptic(); session.addPoint(ar.createAnchor(hit)) }
+            else -> { clearAll(); haptic(); session.start(ar.createAnchor(hit)) }
+        }
+    }
+
+    private fun onAreaClose() = session.closePolygon()
+
+    private fun onAreaUndo() = session.undo()
+
+    private fun onAreaHeight() = session.startHeight()
 
     private fun haptic() {
         binding.root.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
