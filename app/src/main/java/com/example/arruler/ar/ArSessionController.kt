@@ -84,6 +84,18 @@ class ArSessionController(context: Context) {
 
     private val anchors = mutableListOf<Anchor>()
 
+    /**
+     * The Frame of the latest session update. Only valid on the main thread inside [onFrame] (ARCore
+     * invalidates Frames and their Images on the next update); never cache it.
+     */
+    val latestFrame: Frame? get() = lastFrame
+
+    /**
+     * Depth mode requested for the next session configuration (read by [configureSession]); set it
+     * before the ARSceneView is built. DISABLED keeps the old behaviour.
+     */
+    var depthMode: Config.DepthMode = Config.DepthMode.DISABLED
+
     /** Called on every AR frame after [hasSurface] and [trackingState] are refreshed. */
     var onFrame: (() -> Unit)? = null
 
@@ -101,6 +113,9 @@ class ArSessionController(context: Context) {
         config.lightEstimationMode = Config.LightEstimationMode.AMBIENT_INTENSITY
         val depthOk = session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)
         Log.i(TAG, "Depth AUTOMATIC supported on this device: $depthOk")
+        if (depthMode != Config.DepthMode.DISABLED && session.isDepthModeSupported(depthMode)) {
+            config.depthMode = depthMode
+        }
     }
 
     internal fun onSessionCreated(session: Session) {
