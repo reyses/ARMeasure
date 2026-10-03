@@ -82,6 +82,8 @@ dependencies {
     implementation libs.okhttp
     // QR pairing: Google code scanner (own activity, no camera permission, no CameraX)
     implementation libs.play.services.code.scanner
+    // Tap-to-box 2D proposals: ML Kit subject segmentation via Google Play services (model lives in Play services, not in the APK)
+    implementation libs.play.services.mlkit.subject.segmentation
 
     // Testing
     testImplementation libs.junit
