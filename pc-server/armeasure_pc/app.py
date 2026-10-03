@@ -16,11 +16,12 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from . import __version__, config
 from .auth import check_bearer, require_auth
 from .jobs import JobManager, normalize_type
+from .processing import drone as drone_job
 from .net import gpu_info
 
 CHUNK = 1024 * 1024
 API_VERSION = 1
-CODES = {400: "bad_request", 401: "unauthorized", 404: "not_found", 409: "not_ready", 410: "not_found",
+CODES = {400: "bad_request", 401: "unauthorized", 403: "forbidden", 404: "not_found", 409: "not_ready", 410: "not_found",
          413: "too_large", 415: "unsupported_media", 422: "invalid_package", 429: "busy", 503: "busy",
          500: "internal"}
 
@@ -77,6 +78,7 @@ class UploadGuard:
 
 
 POINT_JOBS = ("SCAN_ANALYZE", "OBJECT_MESH")
+PROXY_HEADERS = ("x-forwarded-for", "forwarded", "x-real-ip", "cf-connecting-ip", "cf-ray", "x-forwarded-host")
 
 
 def validate_package(zpath: Path, job_type: str) -> str | None:
@@ -84,6 +86,11 @@ def validate_package(zpath: Path, job_type: str) -> str | None:
     try:
         with zipfile.ZipFile(zpath) as z:
             names = set(z.namelist())
+            if job_type == "DRONE_PHOTOS":
+                if len(drone_job.image_files(list(names))) < drone_job.MIN_IMAGES:
+                    return f"need at least {drone_job.MIN_IMAGES} JPG/DNG images"
+                if "manifest.json" not in names:
+                    return None          # the manifest is optional for drone photos
             if "manifest.json" not in names:
                 return "manifest.json missing"
             info = z.getinfo("manifest.json")
@@ -101,6 +108,8 @@ def validate_package(zpath: Path, job_type: str) -> str | None:
             mt = man.get("job_type")
             if not isinstance(mt, str) or normalize_type(mt) != job_type:
                 return f"manifest job_type {mt!r} does not match type {job_type.lower()!r}"
+            if job_type == "DRONE_PHOTOS":
+                return drone_job.check_manifest(man)
             if job_type in POINT_JOBS:
                 if "cloud.ply" not in names:
                     return "cloud.ply missing"
@@ -176,6 +185,35 @@ def create_app(data_dir: Path | None = None, token: str | None = None, max_uploa
         except BaseException:
             jm.discard(job_id)
             raise
+        jm.enqueue(job_id)
+        return {"id": job_id}
+
+    @app.post("/v1/jobs/local", status_code=202, dependencies=auth)
+    async def submit_local(request: Request):
+        """Create a job from a folder on THIS PC. Loopback only: the path is read by the server process, so a
+        LAN or tunnel client holding the token must not be able to point it at arbitrary server-side folders.
+        cloudflared connects from 127.0.0.1, so requests carrying proxy headers are refused as well."""
+        host = request.client.host if request.client else None
+        if host != "127.0.0.1" or any(h in request.headers for h in PROXY_HEADERS):
+            raise HTTPException(403, "this endpoint accepts requests from 127.0.0.1 only")
+        try:
+            body = await request.json()
+        except ValueError:
+            raise HTTPException(400, "body must be JSON")
+        if not isinstance(body, dict) or not isinstance(body.get("path"), str):
+            raise HTTPException(400, "JSON body with a 'path' string is required")
+        job_type = normalize_type(body.get("type"))
+        if job_type != "DRONE_PHOTOS":
+            raise HTTPException(400, "type must be 'drone_photos'")
+        problem = drone_job.check_manifest({"quality": body.get("quality")})
+        if problem:
+            raise HTTPException(422, problem)
+        problem = drone_job.validate_folder(Path(body["path"]))
+        if problem:
+            raise HTTPException(422, problem)
+        name = body.get("name") if isinstance(body.get("name"), str) else None
+        job_id = jm.create_local(job_type, {"path": str(Path(body["path"]).resolve()),
+                                            "quality": body.get("quality")}, name)
         jm.enqueue(job_id)
         return {"id": job_id}
 

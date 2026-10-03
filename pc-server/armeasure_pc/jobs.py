@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .processing.common import Cancelled, Ctx, JobError
 
-TYPES = ("SCAN_ANALYZE", "OBJECT_MESH", "PHOTOGRAMMETRY")
+TYPES = ("SCAN_ANALYZE", "OBJECT_MESH", "PHOTOGRAMMETRY", "DRONE_PHOTOS")
 STATES = ("QUEUED", "RUNNING", "DONE", "FAILED", "CANCELLED")
 
 
@@ -38,6 +38,9 @@ def _processor(job_type: str):
     if job_type == "OBJECT_MESH":
         from .processing import objmesh
         return objmesh.run
+    if job_type == "DRONE_PHOTOS":
+        from .processing import drone
+        return drone.run
     from .processing import photogrammetry
     return photogrammetry.run
 
@@ -54,6 +57,7 @@ class JobManager:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._last_cleanup = 0.0
+        self.on_progress = None     # optional callback(progress, stage) used by the CLI
 
     # ------------------------------------------------------------ storage
     def dir(self, job_id: str) -> Path:
@@ -96,6 +100,20 @@ class JobManager:
                 "message": None, "created": now_iso()}
         self._save(meta)
         return job_id, d / "upload.zip"
+
+    def create_local(self, job_type: str, source: dict, name: str | None = None) -> str:
+        """Job whose input is a folder on this PC (source.json instead of upload.zip); the photos stay in place."""
+        job_id, _ = self.create(job_type)
+        d = self.dir(job_id)
+        (d / "source.json").write_text(json.dumps({**source, "name": name}), encoding="utf-8")
+        if name:
+            self._update(job_id, name=name)
+        return job_id
+
+    def run_inline(self, job_id: str) -> dict | None:
+        """Run a created job in the calling thread (CLI) and return its final job.json."""
+        self._run(job_id)
+        return self.get(job_id)
 
     def enqueue(self, job_id: str) -> None:
         self.q.put(job_id)
@@ -155,7 +173,7 @@ class JobManager:
                 continue
             if m["state"] == "RUNNING":
                 self._update(m["id"], state="FAILED", message="server restarted while the job was running")
-            elif m["state"] == "QUEUED" and (d / "upload.zip").exists():
+            elif m["state"] == "QUEUED" and ((d / "upload.zip").exists() or (d / "source.json").exists()):
                 self.q.put(m["id"])
             elif m["state"] == "QUEUED":
                 self._update(m["id"], state="FAILED", message="upload incomplete")
@@ -209,6 +227,8 @@ class JobManager:
             cur = self.get(job_id)
             if cur and cur["state"] == "RUNNING":
                 self._update(job_id, progress=round(float(p), 3), stage=stage, message=message)
+                if self.on_progress:
+                    self.on_progress(float(p), stage)
 
         def register(p):
             with self.lock:
