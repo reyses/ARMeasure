@@ -49,6 +49,7 @@ fun ProjectsScreen(
     onRename: (String, String) -> Unit,
     onDelete: (String) -> Unit,
     onSettings: () -> Unit = {},
+    onObjects: () -> Unit = {},
 ) {
     var creating by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<Project?>(null) }
@@ -65,6 +66,9 @@ fun ProjectsScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = onObjects) {
+                        Icon(painterResource(R.drawable.ic_objects), contentDescription = "Objects")
+                    }
                     TextButton(onClick = { creating = true }) { Text("New") }
                     IconButton(onClick = onSettings) {
                         Icon(painterResource(R.drawable.ic_settings), contentDescription = "Settings")

@@ -62,9 +62,44 @@ import com.example.arruler.measure.shapes.ShapeKind
 import com.example.arruler.measure.shapes.ShapePreview
 import com.example.arruler.measure.toVec3
 import com.example.arruler.geometry.Vec3
+import com.example.arruler.depth.CaptureObserver
+import com.example.arruler.depth.ObjectCapture
+import com.example.arruler.objscan.AutoBoxProvider
+import com.example.arruler.objscan.CaptureMode
+import com.example.arruler.objscan.DepthFitAutoBox
+import com.example.arruler.objscan.NoSpinCapture
 import com.example.arruler.objscan.ObjectBox
 import com.example.arruler.objscan.ObjectPlacement
+import com.example.arruler.objscan.PlaneRaycast
+import com.example.arruler.objscan.ResultAnnotator
+import com.example.arruler.objscan.ResultContext
+import com.example.arruler.objscan.SpinCapture
+import com.example.arruler.objscan.SupportPlane
+import com.example.arruler.objscan.SupportPlanePick
+import com.example.arruler.objscan.TextureProvider
+import com.example.arruler.objscan.TexturedObject
 import com.example.arruler.objscan.TriMesh
+import com.example.arruler.ar.RecordingState
+import com.example.arruler.store.AppSettings
+import com.example.arruler.store.ExportNames
+import com.example.arruler.store.ExportResult
+import com.example.arruler.store.MeasurementsText
+import com.example.arruler.store.ObjectExportInfo
+import com.example.arruler.store.PublicExporter
+import com.example.arruler.store.PublicStorage
+import com.example.arruler.scan3d.ObjectShare
+import com.example.arruler.scan3d.ObjectShareFormat
+import com.example.arruler.scan3d.ObjectThumbnail
+import com.example.arruler.ui.KeepAwake
+import com.example.arruler.ui.ObjectDetailScreen
+import com.example.arruler.ui.ObjectFormat
+import com.example.arruler.ui.ObjectHudInfo
+import com.example.arruler.ui.ObjectItem
+import com.example.arruler.ui.ObjectSaveSheet
+import com.example.arruler.ui.ObjectTouchLayer
+import com.example.arruler.ui.ObjectsScreen
+import com.example.arruler.ui.SaveNote
+import com.example.arruler.ui.SaveSnackbar
 import com.example.arruler.processing.Backend
 import com.example.arruler.processing.CloudData
 import com.example.arruler.processing.JobEstimate
@@ -177,6 +212,39 @@ class MainActivity : AppCompatActivity() {
     private var domeShown = false
     private var lastDomeMs = 0L
 
+    // ---- HOOKS for the ML / texture / spin work (docs/WIRING_ROUND3.md) ----
+
+    /** HOOK ML: the 'tap the object' box. Swap this one line for the ML provider, e.g. `MlAutoBoxProvider(this)`. */
+    private val autoBoxProvider: AutoBoxProvider by lazy { DepthFitAutoBox() }
+
+    /** HOOK SPIN: the spin capture (phone on a stand). [NoSpinCapture] until the real one exists; the cards then say 'coming soon'. */
+    private val spinCapture: SpinCapture = NoSpinCapture
+
+    /** HOOK TEXTURE: keyframe capture during the walk (start / frame / pause / finish / reset). Add the texture drone's observer here. */
+    private val captureObservers = mutableListOf<CaptureObserver>()
+
+    /** HOOK ML: extra result lines, e.g. the primitive fit ('Looks like a cylinder: r 9.8 cm, h 20.1 cm, formula volume ...'). */
+    private val resultAnnotators = listOf<ResultAnnotator>()
+
+    /** HOOK TEXTURE: bakes the textured mesh (OBJ + MTL + PNG) once the grey mesh exists; the first non-null wins. */
+    private val textureProviders = listOf<TextureProvider>()
+
+    private lateinit var settings: AppSettings
+    private var pendingMode = CaptureMode.WALK
+    private var pendingCapture: ObjectCapture? = null
+    private var captureVideo: File? = null
+    private var dragOffset: Pair<Float, Float>? = null
+    private var objSaveOpen by mutableStateOf(false)
+    private var saveNote by mutableStateOf<SaveNote?>(null)
+    private var objectReturnTo by mutableStateOf<Screen>(Screen.Projects)
+    private var pendingStorageAction: (() -> Unit)? = null
+
+    private val askStorage = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        val action = pendingStorageAction
+        pendingStorageAction = null
+        if (granted) action?.invoke() else toastLong("Storage permission denied: the copy to Downloads was skipped")
+    }
+
     // ---- plan / projects ----
     private lateinit var repo: ProjectRepository
     private var screen by mutableStateOf<Screen>(Screen.Measure)
@@ -208,6 +276,7 @@ class MainActivity : AppCompatActivity() {
         enableEdgeToEdge()
 
         repo = ProjectRepository(File(filesDir, "projects"))
+        settings = AppSettings(this)
         lastUsedProjectId = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_LAST_PROJECT, null)
 
         ar = ArSessionController(this)
@@ -273,14 +342,36 @@ class MainActivity : AppCompatActivity() {
                 haptic = { view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK) }
                 onDispose { haptic = {} }
             }
+            // The screen stays on while the Measure (AR) screen shows and while a processing card runs.
+            val keepOn = KeepAwake.shouldKeepOn(screen, procUi != null)
+            DisposableEffect(view, keepOn) {
+                view.keepScreenOn = keepOn
+                onDispose { view.keepScreenOn = false }
+            }
+            val pairedPc by hub.pairing.collectAsState()
+            val phoneMoved by spinCapture.phoneMoved.collectAsState()
+            val spinProgress by spinCapture.progress.collectAsState()
+            val copyToDownloads by settings.copyToDownloads.collectAsState()
+            val recordVideo by settings.recordCaptureVideo.collectAsState()
             ArRulerTheme {
                 Box(Modifier.fillMaxSize().background(Color.Black)) {
                     // The AR view stays composed under the other screens so the ARCore session,
                     // anchors and the shared plan frame survive a visit to Projects/Plan. Under the 3D
                     // viewer it is held paused (same composition, session paused, no drawing) so the two
                     // GL surfaces never render together and the anchors still survive.
-                    ArSceneHost(ar, renderer, Modifier.fillMaxSize(), paused = screen is Screen.Scan3D || arPaused)
+                    ArSceneHost(ar, renderer, Modifier.fillMaxSize(), paused = screen is Screen.Scan3D || screen is Screen.ObjectDetail || arPaused)
                     if (screen == Screen.Measure && showDepth) DepthConfidenceOverlay(depthHeat)
+                    if (screen == Screen.Measure && appMode == AppMode.OBJECT &&
+                        (objState.phase == ObjectPhase.IDLE || objState.phase == ObjectPhase.PLACED)
+                    ) {
+                        ObjectTouchLayer(
+                            onTap = ::onObjectTapAt,
+                            onDragStart = ::onObjectDragStart,
+                            onDrag = ::onObjectDrag,
+                            onDragEnd = ::onObjectDragEnd,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
                     if (screen == Screen.Measure) {
                         Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars)) {
                             val liveLow = state.phase == Phase.MEASURING && centerHit?.let { HitRanking.isLowConfidence(it.quality) } == true
@@ -317,7 +408,11 @@ class MainActivity : AppCompatActivity() {
                                     onSave = ::onSaveScanRoom,
                                 )
                                 AppMode.OBJECT -> {
-                                    ObjectControls(objState, state.unit, procUi, objectActions)
+                                    ObjectControls(
+                                        objState, state.unit, procUi,
+                                        ObjectHudInfo(pairedPc != null, spinCapture.available, phoneMoved, spinProgress),
+                                        objectActions,
+                                    )
                                     objResult?.let { r ->
                                         if (objState.phase == ObjectPhase.RESULT) ObjectResultCard(r, state.unit)
                                     }
@@ -361,6 +456,7 @@ class MainActivity : AppCompatActivity() {
                                 onRename = { id, name -> guarded { repo.renameProject(id, name) } },
                                 onDelete = { id -> guarded { repo.deleteProject(id) } },
                                 onSettings = { screen = Screen.Settings },
+                                onObjects = { screen = Screen.Objects },
                             )
                         }
                         Screen.Settings -> Surface(Modifier.fillMaxSize()) {
@@ -375,13 +471,15 @@ class MainActivity : AppCompatActivity() {
                                 pairing = pairing, status = pcStatus,
                                 onScanQr = ::scanPairingQr, onPairText = ::onPairText,
                                 onUnpair = hub::unpair, onTest = hub::testConnection,
+                                copyToDownloads = copyToDownloads, onCopyToDownloads = settings::setCopyToDownloads,
+                                recordVideo = recordVideo, onRecordVideo = settings::setRecordCaptureVideo,
                                 onBack = { screen = Screen.Projects },
                             )
                         }
                         is Screen.Plan -> Surface(Modifier.fillMaxSize()) {
                             val project = projects.firstOrNull { it.id == s.projectId }
                             val scans = remember(s.projectId, scanListVersion) {
-                                ScanFiles.list(scansRoot(this@MainActivity), s.projectId)
+                                ScanFiles.list(scansRoot(this@MainActivity), s.projectId).filter { it.kind != ScanSnapshot.KIND_OBJECT }
                             }
                             PlanScreen(
                                 project = project,
@@ -395,6 +493,9 @@ class MainActivity : AppCompatActivity() {
                                 scans = scans,
                                 onOpenScan = { id -> scan3dSnapshot = null; scan3dReturnTo = s; screen = Screen.Scan3D(id) },
                                 onDeleteScan = { id -> ScanFiles.delete(scansRoot(this@MainActivity), id); scanListVersion++ },
+                                objects = remember(s.projectId, scanListVersion, projects) { objectItems(s.projectId, projects) },
+                                onOpenObject = { id -> objectReturnTo = s; screen = Screen.ObjectDetail(id) },
+                                onExportProject = { project?.let { p -> publicExport(p.name) { it.exportPlan(p, state.unit) } } },
                             )
                         }
                         is Screen.Scan3D -> Surface(Modifier.fillMaxSize()) {
@@ -406,6 +507,27 @@ class MainActivity : AppCompatActivity() {
                                 Scan3DViewer(snap, onBack = { screen = scan3dReturnTo })
                             }
                         }
+                        Screen.Objects -> Surface(Modifier.fillMaxSize()) {
+                            val items = remember(scanListVersion, projects) { objectItems(null, projects) }
+                            ObjectsScreen(
+                                items = items, units = state.unit,
+                                onBack = { screen = Screen.Projects },
+                                onOpen = { id -> objectReturnTo = Screen.Objects; screen = Screen.ObjectDetail(id) },
+                            )
+                        }
+                        is Screen.ObjectDetail -> Surface(Modifier.fillMaxSize()) {
+                            ObjectDetailHost(s.scanId, projects, state.unit)
+                        }
+                    }
+                    if (objSaveOpen) objResult?.let { r ->
+                        ObjectSaveSheet(
+                            summary = ObjectFormat.dims(state.unit, summaryOf(r.outcome)) + ", " + ObjectFormat.volume(state.unit, r.outcome.volume.recommended.toFloat()),
+                            projects = projects,
+                            lastUsedId = lastUsedProjectId,
+                            existingNames = { choice -> objectNames((choice as? ProjectChoice.Existing)?.id) },
+                            onSave = { name, choice -> objSaveOpen = false; onObjectSave(r, name, choice) },
+                            onDismiss = { objSaveOpen = false },
+                        )
                     }
                     saveDraft?.let { draft ->
                         SaveRoomSheet(
@@ -460,12 +582,15 @@ class MainActivity : AppCompatActivity() {
                             { confirmUpload = null; onUploadDeclined() },
                         )
                     }
+                    SaveSnackbar(saveNote, ::onSnackOpenFolder, ::onSnackShare) { saveNote = null }
                 }
                 BackHandler(enabled = screen != Screen.Measure) {
                     screen = when (screen) {
                         is Screen.Plan -> Screen.Projects
                         Screen.Settings -> Screen.Projects
                         is Screen.Scan3D -> scan3dReturnTo
+                        Screen.Objects -> Screen.Projects
+                        is Screen.ObjectDetail -> objectReturnTo
                         else -> Screen.Measure
                     }
                 }
@@ -497,10 +622,7 @@ class MainActivity : AppCompatActivity() {
     private fun onArTap(x: Float, y: Float) {
         if (screen != Screen.Measure) return
         if (appMode == AppMode.SCAN) return
-        if (appMode == AppMode.OBJECT) {
-            ar.hitTest(x, y)?.let(::onObjectTap)
-            return
-        }
+        if (appMode == AppMode.OBJECT) return
         if (appMode == AppMode.SHAPES) {
             ar.hitTest(x, y)?.let(::onShapeTap)
             return
@@ -518,7 +640,8 @@ class MainActivity : AppCompatActivity() {
     private fun onMainButton() {
         if (appMode == AppMode.SCAN) return onScanStartPause()
         if (appMode == AppMode.OBJECT) {
-            ar.hitTestCenter()?.let(::onObjectTap)
+            val (w, h) = ar.viewSize
+            onObjectTapAt(w / 2f, h / 2f)
             return
         }
         if (appMode == AppMode.SHAPES) {
@@ -642,6 +765,7 @@ class MainActivity : AppCompatActivity() {
             scan3dSnapshot = snap
             scan3dReturnTo = Screen.Measure
             scanListVersion++
+            exportScanCopy(snap)
             screen = Screen.Scan3D(id)
         }
     }
@@ -697,9 +821,12 @@ class MainActivity : AppCompatActivity() {
         ObjectActions(
             onResize = objectScan::resize,
             onRotate = { objectScan.rotate() },
+            onScale = objectScan::scale,
             onFit = ::onObjectFit,
-            onStart = { if (objectScan.phase == ObjectPhase.PAUSED) objectScan.start() else picker = PickerRequest.Object },
-            onPause = objectScan::pause,
+            onChooseMode = ::onChooseCaptureMode,
+            onBeginHybridSpin = ::onBeginHybridSpin,
+            onResume = ::onObjectResume,
+            onPause = ::onObjectPause,
             onFinish = ::onObjectFinish,
             onReset = ::onObjectReset,
             onCancelJob = ::onCancelJob,
@@ -712,6 +839,8 @@ class MainActivity : AppCompatActivity() {
         if (frame.camera.trackingState != TrackingState.TRACKING) return
         val t = frame.camera.pose
         objectScan.onFrame(frame, Vec3(t.tx(), t.ty(), t.tz()))
+        val st = objectScan.state.value
+        if (st.phase == ObjectPhase.CAPTURING && !st.spinning) captureObservers.forEach { it.onFrame(frame) }
         val now = SystemClock.elapsedRealtime()
         if (now - lastDomeMs < DOME_INTERVAL_MS) return
         lastDomeMs = now
@@ -743,12 +872,99 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun onObjectTap(hit: ArSessionController.SurfaceHit) {
+    /**
+     * 'Tap the object': the tap hit gives a point on the object, the plane under it (table or floor) is the support
+     * plane, and [autoBoxProvider] fits a box aligned to the object. Without a provider result the default box stays.
+     */
+    private fun onObjectTapAt(x: Float, y: Float) {
         val phase = objectScan.phase
         if (phase != ObjectPhase.IDLE && phase != ObjectPhase.PLACED) return
-        if (hit.kind != SurfaceKind.FLOOR) return toast("Tap a horizontal surface: the floor or a table top")
+        val hit = ar.hitTest(x, y) ?: return toast("Point at the object so the camera can see its surface")
+        val tap = hit.point.toVec3()
+        val planeY = SupportPlanePick.pick(tap, ar.supportPlaneCandidates(hit.point))
+            ?: tap.y.takeIf { hit.kind == SurfaceKind.FLOOR }
+            ?: return toast("Show the table or floor the object stands on, then tap again")
+        val cam = ar.cameraPosition()?.toVec3() ?: return
+        val (w, h) = ar.viewSize
         haptic()
-        objectScan.place(Vec3(hit.point.x, hit.point.y, hit.point.z))
+        objectScan.tapObject(tap, SupportPlane.horizontal(planeY), cam, x, y, w, h, autoBoxProvider) { found ->
+            runOnUiThread {
+                snapHaptic()
+                if (!found) toastLong("Could not see the object's shape. Check the box, or tap Adjust to size it.")
+            }
+        }
+    }
+
+    /** Drag on the screen moves the box along its support plane: the touch ray meets the plane, the grab offset keeps the box from jumping. */
+    private fun onObjectDragStart(x: Float, y: Float) {
+        dragOffset = null
+        if (objectScan.phase != ObjectPhase.PLACED) return
+        val box = objectScan.state.value.box ?: return
+        val hit = ar.rayAt(x, y)?.let { PlaneRaycast.intersectHorizontal(it, box.centre.y) } ?: return
+        dragOffset = ObjectPlacement.grabOffset(box, hit)
+    }
+
+    private fun onObjectDrag(x: Float, y: Float) {
+        val off = dragOffset ?: return
+        val box = objectScan.state.value.box ?: return
+        val hit = ar.rayAt(x, y)?.let { PlaneRaycast.intersectHorizontal(it, box.centre.y) } ?: return
+        objectScan.moveBox(ObjectPlacement.dragMove(box, off, hit).centre)
+    }
+
+    private fun onObjectDragEnd() {
+        if (dragOffset != null) { dragOffset = null; snapHaptic() }
+    }
+
+    /** A firmer tick for a snap (the box landing on the object, the end of a drag). */
+    private fun snapHaptic() {
+        window?.decorView?.performHapticFeedback(
+            if (android.os.Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.LONG_PRESS,
+        )
+    }
+
+    // ---- capture modes, video, hooks ----
+
+    private fun onChooseCaptureMode(mode: CaptureMode) {
+        pendingMode = mode
+        when (mode) {
+            CaptureMode.WALK, CaptureMode.HYBRID -> picker = PickerRequest.Object
+            CaptureMode.SPIN -> {
+                val box = objectScan.state.value.box ?: return
+                objectScan.startSpin()
+                startCaptureVideo()
+                spinCapture.startSpinCapture(box, SupportPlane.horizontal(box.centre.y), hybrid = false)
+            }
+        }
+    }
+
+    /** HYBRID: the walk is done, the phone goes on its stand and the spin photos start. */
+    private fun onBeginHybridSpin() {
+        val box = objectScan.state.value.box ?: return
+        objectScan.beginHybridSpin()
+        spinCapture.startSpinCapture(box, SupportPlane.horizontal(box.centre.y), hybrid = true)
+    }
+
+    private fun onObjectResume() {
+        val box = objectScan.state.value.box
+        objectScan.start()
+        if (box != null) captureObservers.forEach { it.onCaptureStart(box, SupportPlane.horizontal(box.centre.y), resumed = true) }
+    }
+
+    private fun onObjectPause() {
+        objectScan.pause()
+        captureObservers.forEach { it.onCapturePause() }
+    }
+
+    /** Starts the ARCore MP4 recording of the capture when 'Record capture video' is on (reuses a recording already running). */
+    private fun startCaptureVideo() {
+        captureVideo = null
+        if (!settings.recordCaptureVideo.value) return
+        if (ar.recorder.state.value !is RecordingState.Recording) ar.recorder.start()
+        captureVideo = (ar.recorder.state.value as? RecordingState.Recording)?.file
+    }
+
+    private fun stopCaptureVideo() {
+        if (captureVideo != null && ar.recorder.state.value is RecordingState.Recording) ar.recorder.stop()
     }
 
     private fun onObjectFit() {
@@ -765,13 +981,29 @@ class MainActivity : AppCompatActivity() {
     /** The picker's answer: remember the job quality and start capturing with the matching voxel size. */
     private fun onObjectQualityChosen(id: String) {
         val q = runCatching { ProcQuality.valueOf(id) }.getOrNull() ?: return
-        objectScan.start(if (q == ProcQuality.FINE) ScanQuality.FINE else ScanQuality.QUICK)
+        val box = objectScan.state.value.box ?: return
+        objectScan.start(if (q == ProcQuality.FINE) ScanQuality.FINE else ScanQuality.QUICK, pendingMode)
+        startCaptureVideo()
+        captureObservers.forEach { it.onCaptureStart(box, SupportPlane.horizontal(box.centre.y), resumed = false) }
+    }
+
+    /** HOOK SPIN: the spin photos are handed to the PC pipeline here once a real [SpinCapture] exists. */
+    private fun onSpinFinished() {
+        spinCapture.stopSpinCapture()
+        stopCaptureVideo()
+        toastLong("Spin photos are sent to your PC for processing")
     }
 
     private fun onObjectFinish() {
+        val before = objectScan.state.value
         objectScan.pause()
+        if (before.captureMode == CaptureMode.SPIN) return onSpinFinished()
+        if (before.spinning) spinCapture.stopSpinCapture()
+        stopCaptureVideo()
+        captureObservers.forEach { it.onCaptureFinish() }
         lifecycleScope.launch {
             val cap = objectScan.capture() ?: return@launch toast("Nothing captured yet. Move closer to the object.")
+            pendingCapture = cap
             objectScan.working()
             renderer.renderDome(MeasurePoint(0f, 0f, 0f), emptyList(), 0f)
             domeShown = false
@@ -819,7 +1051,16 @@ class MainActivity : AppCompatActivity() {
             return toastLong("The result has no object dimensions")
         }
         val mesh = if (done.backend == Backend.PHONE) job.mesh else done.resultZip?.let { loadResultMesh(it) }
-        objResult = ObjectResultState(outcome, mesh, null)
+        val cap = pendingCapture
+        val units = session.state.value.unit
+        var extras = emptyList<Pair<String, String>>()
+        var textured: TexturedObject? = null
+        if (cap != null && (resultAnnotators.isNotEmpty() || textureProviders.isNotEmpty())) {
+            val ctx = ResultContext(mesh, cap.points, cap.box, cap.plane, summaryOf(outcome))
+            extras = resultAnnotators.flatMap { a -> runCatching { a.annotate(ctx, units) }.getOrDefault(emptyList()) }
+            textured = textureProviders.firstNotNullOfOrNull { p -> runCatching { p.bake(ctx) }.getOrNull() }
+        }
+        objResult = ObjectResultState(outcome, mesh, null, extras, textured, textured?.bestPhoto, captureVideo)
         procUi = null
         objectScan.showResult()
     }
@@ -838,6 +1079,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun resetObject() {
+        if (objectScan.state.value.spinning || objectScan.state.value.captureMode != CaptureMode.WALK) spinCapture.stopSpinCapture()
+        stopCaptureVideo()
+        captureVideo = null
+        pendingCapture = null
+        captureObservers.forEach { it.onCaptureReset() }
+        objSaveOpen = false
         objResult = null
         objectScan.reset()
         renderedBox = null
@@ -869,15 +1116,18 @@ class MainActivity : AppCompatActivity() {
         o.volume.low.toFloat(), o.volume.high.toFloat(), o.volume.recommended.toFloat(),
     )
 
-    private fun objectSnapshot(r: ObjectResultState, id: String, projectId: String?, mesh: TriMesh) = ScanSnapshot(
+    private fun objectSnapshot(r: ObjectResultState, id: String, projectId: String?, mesh: TriMesh, name: String?) = ScanSnapshot(
         id, projectId, System.currentTimeMillis(), FloatArray(0), FloatArray(0), emptyList(), null,
         mesh, ScanSnapshot.KIND_OBJECT, summaryOf(r.outcome),
+        name = name,
+        method = "${r.outcome.backend}, " + String.format(java.util.Locale.US, "%.1f s", r.outcome.durationMs / 1000.0),
+        extras = r.extras.map { (k, v) -> "$k: $v" },
     )
 
     private fun onObjectView3D(r: ObjectResultState) {
         val mesh = r.mesh ?: return toast("No mesh was produced")
         val id = r.savedId ?: java.util.UUID.randomUUID().toString()
-        scan3dSnapshot = objectSnapshot(r, id, null, mesh)
+        scan3dSnapshot = objectSnapshot(r, id, null, mesh, null)
         scan3dReturnTo = Screen.Measure
         screen = Screen.Scan3D(id)
     }
@@ -891,27 +1141,74 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Saves the object into the current / last-used project's scans (kind = object). */
-    private fun onObjectSave(r: ObjectResultState) {
+    /** Names of the objects already saved in [projectId] (null: a new project, so none). */
+    private fun objectNames(projectId: String?): List<String> =
+        if (projectId == null) emptyList()
+        else ScanFiles.list(scansRoot(this), projectId).filter { it.kind == ScanSnapshot.KIND_OBJECT }.mapNotNull { it.name }
+
+    /** Saved objects of [projectId] (all projects when null), newest first, with their project names. */
+    private fun objectItems(projectId: String?, projects: List<Project>): List<ObjectItem> =
+        ScanFiles.list(scansRoot(this), projectId)
+            .filter { it.kind == ScanSnapshot.KIND_OBJECT }
+            .map { info -> ObjectItem(info, projects.firstOrNull { it.id == info.projectId }?.name) }
+
+    /**
+     * Saves the finished object: scan files + thumbnail (the mesh render, or the texture drone's photo) + textured mesh +
+     * capture video into the chosen project, then copies everything to Download/ARMeasure/<project>.
+     */
+    private fun onObjectSave(r: ObjectResultState, name: String, choice: ProjectChoice) {
         val mesh = r.mesh ?: return toast("No mesh to save")
         if (r.savedId != null) return toast("Already saved")
+        val project: Project = try {
+            when (choice) {
+                is ProjectChoice.Existing -> repo.project(choice.id) ?: return toast("Project not found")
+                is ProjectChoice.New -> repo.createProject(choice.name)
+            }
+        } catch (e: IOException) {
+            return toast("Storage error: ${e.message}")
+        }
+        lastUsedProjectId = project.id
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_LAST_PROJECT, project.id).apply()
         lifecycleScope.launch {
             val id = java.util.UUID.randomUUID().toString()
-            val projectId = scanProjectId()
-            val snap = objectSnapshot(r, id, projectId, mesh)
-            withContext(Dispatchers.IO) { runCatching { ScanFiles.save(scansRoot(this@MainActivity), snap) } }
-                .onSuccess {
-                    objResult = r.copy(savedId = id)
-                    scanListVersion++
-                    toast("Saved to the project's scans")
+            val snap = objectSnapshot(r, id, project.id, mesh, name)
+            val root = scansRoot(this@MainActivity)
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    ScanFiles.save(root, snap)
+                    ObjectThumbnail.save(root, id, mesh, r.thumbnailOverride)
+                    r.textured?.let { ScanFiles.saveTextured(root, id, it) }
+                    r.video?.let { ScanFiles.saveVideo(root, id, it) }
                 }
-                .onFailure { toast("Could not save the object: ${it.message}") }
+            }.onSuccess {
+                objResult = r.copy(savedId = id)
+                scanListVersion++
+                if (settings.copyToDownloads.value) {
+                    val info = exportInfoOf(snap, project.name)
+                    publicExport(project.name) { it.exportObject(info, mesh, r.textured, session.state.value.unit, r.video) }
+                } else {
+                    toast("Saved to ${project.name}")
+                }
+            }.onFailure { toast("Could not save the object: ${it.message}") }
         }
     }
 
+    private fun exportInfoOf(s: ScanSnapshot, projectName: String) = ObjectExportInfo(
+        name = s.name ?: "Object",
+        createdAt = s.createdAt,
+        projectName = projectName,
+        summary = s.objectSummary ?: ObjectSummary(0f, 0f, 0f, 0f, 0f, 0f),
+        method = s.method,
+        notes = s.notes,
+        extras = s.extras.map { line ->
+            val i = line.indexOf(": ")
+            if (i > 0) line.substring(0, i) to line.substring(i + 2) else "Note" to line
+        },
+    )
+
     @Composable
     private fun BoxScope.ObjectResultCard(r: ObjectResultState, units: Units) {
-        val lines = ObjectCardText.lines(units, r.outcome) +
+        val lines = ObjectCardText.lines(units, r.outcome) + r.extras +
             (if (r.mesh == null) listOf("Mesh" to "not available (too sparse or too large)") else emptyList())
         ResultCard(
             "Object (${r.outcome.backend})",
@@ -922,10 +1219,111 @@ class MainActivity : AppCompatActivity() {
                     "Share",
                     menu = MeshExport.entries.map { f -> f.label to { onObjectShare(r, f) } },
                 ) else null,
-                if (r.mesh != null) CardAction(if (r.savedId != null) "Saved" else "Save", Color(0xFF34C759), { onObjectSave(r) }) else null,
+                if (r.mesh != null) CardAction(
+                    if (r.savedId != null) "Saved" else "Save", Color(0xFF34C759),
+                    { if (r.savedId == null) objSaveOpen = true },
+                ) else null,
             ),
         )
     }
+
+    // ---- saved objects: detail page, public export, snackbar ----
+
+    @Composable
+    private fun ObjectDetailHost(scanId: String, projects: List<Project>, units: Units) {
+        val root = scansRoot(this)
+        val snap = remember(scanId, scanListVersion) { ScanFiles.load(root, scanId) }
+        val mesh = snap?.mesh
+        if (snap == null || mesh == null) {
+            LaunchedEffect(Unit) { toast("Object not found"); screen = objectReturnTo }
+            return
+        }
+        val projectName = projects.firstOrNull { it.id == snap.projectId }?.name ?: ExportNames.DEFAULT_PROJECT
+        val hasVideo = remember(scanId, scanListVersion) { ScanFiles.videoFile(root, scanId).isFile }
+        ObjectDetailScreen(
+            snapshot = snap, projectName = projects.firstOrNull { it.id == snap.projectId }?.name, units = units, hasVideo = hasVideo,
+            onBack = { screen = objectReturnTo },
+            onRename = { n -> ScanFiles.updateMeta(root, scanId, name = n.trim().ifEmpty { null }); scanListVersion++ },
+            onSaveNotes = { n -> ScanFiles.updateMeta(root, scanId, notes = n); scanListVersion++; toast("Notes saved") },
+            onShare = { f ->
+                try {
+                    ObjectShare.share(this, exportInfoOf(snap, projectName), mesh, ScanFiles.loadTextured(root, scanId), units, f)
+                } catch (e: Exception) {
+                    toast("Share failed: ${e.message}")
+                }
+            },
+            onOpenDownloads = { openObjectInDownloads(snap, projectName, units) },
+            onPlayVideo = {
+                val name = ExportNames.plain(snap.name ?: "Object", "capture", "mp4")
+                val uri = PublicStorage.findUri(this, projectName, name)
+                if (!PublicStorage.playVideo(this, uri, ScanFiles.videoFile(root, scanId))) toastLong("No video player found for the capture video")
+            },
+            onFullScreen = { scan3dSnapshot = snap; scan3dReturnTo = Screen.ObjectDetail(scanId); screen = Screen.Scan3D(scanId) },
+            onDelete = { ScanFiles.delete(root, scanId); scanListVersion++; screen = objectReturnTo },
+        )
+    }
+
+    /** Exports the object to Downloads when it is not there yet, then opens the folder. */
+    private fun openObjectInDownloads(snap: ScanSnapshot, projectName: String, units: Units) {
+        val mesh = snap.mesh ?: return
+        runWithStoragePermission {
+            lifecycleScope.launch {
+                val present = withContext(Dispatchers.IO) {
+                    PublicStorage.findUri(this@MainActivity, projectName, ExportNames.plain(snap.name ?: "Object", "mesh", "obj")) != null
+                }
+                if (!present) {
+                    val root = scansRoot(this@MainActivity)
+                    val video = ScanFiles.videoFile(root, snap.id)
+                    val res = withContext(Dispatchers.IO) {
+                        runCatching {
+                            PublicStorage.exporter(this@MainActivity)
+                                .exportObject(exportInfoOf(snap, projectName), mesh, ScanFiles.loadTextured(root, snap.id), units, video)
+                        }
+                    }
+                    res.onFailure { return@launch toastLong("Could not copy to Downloads: ${it.message}") }
+                }
+                if (!PublicStorage.openFolder(this@MainActivity, projectName)) {
+                    toastLong("Open the Files app, then Download > ARMeasure > $projectName")
+                }
+            }
+        }
+    }
+
+    /** Runs [action] once the Downloads copy may write: at once on Android 10+, after the storage permission on 9 and older. */
+    private fun runWithStoragePermission(action: () -> Unit) {
+        if (PublicStorage.needsLegacyPermission(this)) {
+            pendingStorageAction = action
+            askStorage.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        } else {
+            action()
+        }
+    }
+
+    /**
+     * Copies a save into Download/ARMeasure/<project> when 'Copy saves to Downloads' is on, then shows the snackbar
+     * 'Saved to Download/ARMeasure/<project>' with Open folder and Share. [block] runs off the main thread.
+     */
+    private fun publicExport(projectName: String, block: (PublicExporter) -> ExportResult) {
+        if (!settings.copyToDownloads.value) return
+        runWithStoragePermission {
+            lifecycleScope.launch {
+                withContext(Dispatchers.IO) { runCatching { block(PublicStorage.exporter(this@MainActivity)) } }
+                    .onSuccess { saveNote = SaveNote(ExportNames.savedMessage(projectName), it) }
+                    .onFailure { toastLong("Could not copy to Downloads: ${it.message}") }
+            }
+        }
+    }
+
+    private fun onSnackOpenFolder(note: SaveNote) {
+        saveNote = null
+        if (!PublicStorage.openFolder(this, note.result.project)) toastLong("Open the Files app, then ${note.result.folder.replace("/", " > ")}")
+    }
+
+    private fun onSnackShare(note: SaveNote) {
+        saveNote = null
+        try { PublicStorage.share(this, note.result) } catch (e: Exception) { toast("Share failed: ${e.message}") }
+    }
+
 
     // ---- processing: scan analysis on the PC, pairing ----
 
@@ -1003,6 +1401,7 @@ class MainActivity : AppCompatActivity() {
             scan3dSnapshot = snap
             scan3dReturnTo = Screen.Measure
             scanListVersion++
+            exportScanCopy(snap)
             screen = Screen.Scan3D(id)
         }
     }
@@ -1062,7 +1461,12 @@ class MainActivity : AppCompatActivity() {
             savedFor = s.points to s.heightPoint
             if (appMode == AppMode.SCAN) scanSaved = true
             saveDraft = null
-            toast("Saved to ${project.name}")
+            if (settings.copyToDownloads.value) {
+                val saved = repo.project(project.id)
+                if (saved != null) publicExport(project.name) { it.exportRoom(saved, room, state0Unit()) }
+            } else {
+                toast("Saved to ${project.name}")
+            }
         } catch (e: IOException) {
             toast("Could not save: ${e.message}")
         }
@@ -1110,6 +1514,14 @@ class MainActivity : AppCompatActivity() {
         ar.recorder.log(TrackEvent.PointPlaced(pointCount++, p.x, p.y, p.z, System.currentTimeMillis()))
     }
 
+    /** Copies a saved room scan (cloud + surfaces) to Download/ARMeasure/<project>. */
+    private fun exportScanCopy(snap: ScanSnapshot) {
+        val name = snap.projectId?.let { repo.project(it)?.name } ?: return
+        publicExport(name) { it.exportScan(name, snap, "Scan") }
+    }
+
+    private fun state0Unit(): Units = session.state.value.unit
+
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
 
     private fun toastLong(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
@@ -1137,7 +1549,19 @@ private sealed interface PickerRequest {
 }
 
 /** A finished object job: numbers, the mesh (null when none was built) and the saved scan id once saved. */
-private data class ObjectResultState(val outcome: ObjectOutcome, val mesh: TriMesh?, val savedId: String?)
+private data class ObjectResultState(
+    val outcome: ObjectOutcome,
+    val mesh: TriMesh?,
+    val savedId: String?,
+    /** Extra card lines from the [ResultAnnotator] hooks (primitive fit). */
+    val extras: List<Pair<String, String>> = emptyList(),
+    /** The textured mesh from the [TextureProvider] hook, null while the mesh is grey. */
+    val textured: TexturedObject? = null,
+    /** HOOK: replaces the mesh render as the gallery thumbnail (the texture drone's best keyframe photo). */
+    val thumbnailOverride: android.graphics.Bitmap? = null,
+    /** The capture video of this scan, if one was recorded. */
+    val video: File? = null,
+)
 
 /** A room-scan result that came back (from the PC, or the phone through the service) with optional planes and mesh. */
 private class ScanPcResult(val result: ResultJson, val planes: List<SnapshotPlane>, val mesh: TriMesh?)

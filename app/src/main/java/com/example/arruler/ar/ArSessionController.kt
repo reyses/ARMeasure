@@ -10,6 +10,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.example.arruler.depth.DepthFrameSampler
 import com.example.arruler.measure.MeasurePoint
+import com.example.arruler.objscan.PlaneCandidate
+import com.example.arruler.objscan.PlaneRaycast
+import com.example.arruler.objscan.Ray
 import com.google.ar.core.Anchor
 import com.google.ar.core.Config
 import com.google.ar.core.Coordinates2d
@@ -414,6 +417,42 @@ class ArSessionController(
                 heatInFlight = false
             }
         }
+    }
+
+    // ---- object placement helpers ----
+
+    /** Size in pixels of the AR view (the space of the tap coordinates), 0 x 0 before the first layout. */
+    val viewSize: Pair<Int, Int> get() = viewWidth to viewHeight
+
+    /** The camera position of the latest frame, or null. */
+    fun cameraPosition(): MeasurePoint? {
+        val frame = lastFrame ?: return null
+        val p = frame.camera.pose
+        return MeasurePoint(p.tx(), p.ty(), p.tz())
+    }
+
+    /** Upward-facing planes as (height, horizontal distance from [tap] to the plane's polygon): which surface an object stands on. */
+    fun supportPlaneCandidates(tap: MeasurePoint): List<PlaneCandidate> {
+        val session = currentSession() ?: return emptyList()
+        val out = ArrayList<PlaneCandidate>()
+        for (plane in session.getAllTrackables(Plane::class.java)) {
+            if (plane.trackingState != TrackingState.TRACKING || plane.subsumedBy != null) continue
+            if (plane.type != Plane.Type.HORIZONTAL_UPWARD_FACING) continue
+            val local = plane.centerPose.inverse().transformPoint(floatArrayOf(tap.x, tap.y, tap.z))
+            out += PlaneCandidate(plane.centerPose.ty(), HitRanking.polygonDistance(polygonXz(plane), local[0], local[2]))
+        }
+        return out
+    }
+
+    /** The world ray through view pixel ([x], [y]) of the latest frame, or null when there is no frame or camera. */
+    fun rayAt(x: Float, y: Float): Ray? {
+        val frame = lastFrame ?: return null
+        if (frame.camera.trackingState != TrackingState.TRACKING || viewWidth == 0 || viewHeight == 0) return null
+        val view = FloatArray(16)
+        val proj = FloatArray(16)
+        frame.camera.getViewMatrix(view, 0)
+        frame.camera.getProjectionMatrix(proj, 0, 0.05f, 100f)
+        return PlaneRaycast.rayFromScreen(x, y, viewWidth, viewHeight, view, proj)
     }
 
     /** Creates an anchor at the hit and returns its world position. */

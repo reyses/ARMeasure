@@ -1,7 +1,12 @@
 package com.example.arruler.depth
 
 import com.example.arruler.geometry.Vec3
+import com.example.arruler.objscan.AutoBoxProvider
 import com.example.arruler.objscan.BoxDim
+import com.example.arruler.objscan.CaptureMode
+import com.example.arruler.objscan.DepthPointSource
+import com.example.arruler.objscan.FrameContext
+import com.example.arruler.objscan.SpinText
 import com.example.arruler.objscan.CoverageDome
 import com.example.arruler.objscan.DomeBin
 import com.example.arruler.objscan.ObjectBox
@@ -47,6 +52,10 @@ data class ObjectUiState(
     val fitting: Boolean = false,
     /** Voxels collected around the tap for Fit. */
     val fitVoxels: Int = 0,
+    /** How the capture runs (chosen after 'Looks right'). */
+    val captureMode: CaptureMode = CaptureMode.WALK,
+    /** True while the spin stage runs (SPIN, or the second half of HYBRID): the phone is on a stand, no walk capture. */
+    val spinning: Boolean = false,
 )
 
 /** The raw capture handed to isolation / the PC. */
@@ -83,9 +92,9 @@ class ObjectScanController(private val scope: CoroutineScope) {
 
     val phase: ObjectPhase get() = _state.value.phase
 
-    /** Drops the box on the horizontal plane through [tap] (also moves an already placed box, keeping its size and yaw). */
-    fun place(tap: Vec3) {
-        val keep = _state.value.box
+    /** Drops the box on the horizontal plane through [tap] (also moves an already placed box, keeping its size and yaw unless [keepSize] is false). */
+    fun place(tap: Vec3, keepSize: Boolean = true) {
+        val keep = if (keepSize) _state.value.box else null
         val box = keep?.moveTo(tap) ?: ObjectPlacement.defaultBox(tap)
         plane = ObjectPlacement.supportPlane(tap)
         generation++
@@ -94,6 +103,52 @@ class ObjectScanController(private val scope: CoroutineScope) {
         fitCloud = ObjectVoxelCloud(sb, ObjectQuality.QUICK.voxelSize, FIT_MAX_VOXELS)
         _state.value = ObjectUiState(ObjectPhase.PLACED, box, _state.value.quality)
     }
+
+    /**
+     * 'Tap the object': drops a default box under the tap and asks [provider] for one aligned to the object. The pre-scan
+     * cloud around the tap fills meanwhile (the provider may wait for it). [onDone] gets true when the provider found
+     * the object, false when the default box stays; it runs on a background thread.
+     */
+    fun tapObject(
+        hitOnObject: Vec3, supportPlane: SupportPlane, camera: Vec3, tapX: Float, tapY: Float, viewW: Int, viewH: Int,
+        provider: AutoBoxProvider, onDone: (Boolean) -> Unit,
+    ) {
+        val onPlane = Vec3(hitOnObject.x, supportPlane.d, hitOnObject.z)
+        place(onPlane, keepSize = false)
+        _state.value = _state.value.copy(fitting = true)
+        val gen = generation
+        val ctx = FrameContext(supportPlane, hitOnObject, onPlane, camera, viewW, viewH, depthSource)
+        scope.launch(Dispatchers.Default) {
+            val proposed = try {
+                provider.propose(tapX, tapY, ctx)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+            val cur = _state.value
+            _state.value = if (gen == generation && cur.phase == ObjectPhase.PLACED) {
+                cur.copy(box = proposed?.onPlane(supportPlane) ?: cur.box, fitting = false)
+            } else {
+                cur.copy(fitting = false)
+            }
+            onDone(proposed != null && gen == generation)
+        }
+    }
+
+    private val depthSource = object : DepthPointSource {
+        override fun voxelCount(): Int = fitCloud?.count ?: 0
+        override suspend fun points(): FloatArray {
+            val fc = fitCloud ?: return FloatArray(0)
+            return lock.withLock { fc.points(1) }
+        }
+    }
+
+    /** Moves the placed box to [centre] (drag); the base stays on the plane. */
+    fun moveBox(centre: Vec3) = editBox { it.moveTo(Vec3(centre.x, it.centre.y, centre.z)) }
+
+    /** 'Bigger' / 'Smaller': all sides times [factor]. */
+    fun scale(factor: Float) = editBox { ObjectPlacement.scaleUniform(it, factor) }
 
     fun resize(dim: BoxDim, deltaM: Float) = editBox { ObjectPlacement.resize(it, dim, deltaM) }
 
@@ -137,7 +192,7 @@ class ObjectScanController(private val scope: CoroutineScope) {
     }
 
     /** Locks the box and starts (or, from PAUSED, resumes) the capture. */
-    fun start(quality: ObjectQuality = _state.value.quality) {
+    fun start(quality: ObjectQuality = _state.value.quality, mode: CaptureMode = CaptureMode.WALK) {
         val s = _state.value
         val b = s.box ?: return
         when (s.phase) {
@@ -152,11 +207,34 @@ class ObjectScanController(private val scope: CoroutineScope) {
                 _state.value = s.copy(
                     phase = ObjectPhase.CAPTURING, quality = quality, voxels = 0, points = 0, coverage = 0f,
                     hint = ObjectPlacement.hint(d.bins(), 0f, null, windowOf(b)),
+                    captureMode = mode, spinning = false,
                 )
             }
             ObjectPhase.PAUSED -> _state.value = s.copy(phase = ObjectPhase.CAPTURING)
             else -> {}
         }
+    }
+
+    /** SPIN: locks the box and shows the spin stage; no walk capture runs (the spin capture hook takes the photos). */
+    fun startSpin() {
+        val s = _state.value
+        if (s.phase != ObjectPhase.PLACED || s.box == null) return
+        generation++
+        fitCloud = null
+        cloud = null
+        dome = null
+        _state.value = s.copy(
+            phase = ObjectPhase.CAPTURING, captureMode = CaptureMode.SPIN, spinning = true,
+            voxels = 0, points = 0, coverage = 0f, hint = SpinText.INSTRUCTION,
+        )
+    }
+
+    /** HYBRID: the walk is done, the spin stage starts (the walk cloud is kept for Finish). */
+    fun beginHybridSpin() {
+        val s = _state.value
+        if (s.captureMode != CaptureMode.HYBRID || s.spinning) return
+        if (s.phase != ObjectPhase.CAPTURING && s.phase != ObjectPhase.PAUSED) return
+        _state.value = s.copy(phase = ObjectPhase.CAPTURING, spinning = true, hint = SpinText.INSTRUCTION)
     }
 
     fun pause() {
@@ -191,6 +269,7 @@ class ObjectScanController(private val scope: CoroutineScope) {
                 }
             }
             ObjectPhase.CAPTURING -> {
+                if (s.spinning) return
                 val c = cloud ?: return
                 val box = s.box ?: return
                 val gen = generation

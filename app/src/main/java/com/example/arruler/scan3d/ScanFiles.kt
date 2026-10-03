@@ -2,6 +2,7 @@ package com.example.arruler.scan3d
 
 import com.example.arruler.depth.PlaneKind
 import com.example.arruler.geometry.ColorRamp
+import com.example.arruler.objscan.TexturedObject
 import com.example.arruler.store.writeAtomic
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -52,6 +53,10 @@ internal data class ScanMetaDto(
     val schema: Int = 1,
     val kind: String = ScanSnapshot.KIND_ROOM,
     val objectSummary: ObjectSummaryDto? = null,
+    val name: String? = null,
+    val notes: String? = null,
+    val method: String? = null,
+    val extras: List<String> = emptyList(),
 )
 
 /** One saved scan as listed in the UI. */
@@ -63,6 +68,8 @@ data class ScanInfo(
     val roomAreaM2: Float?,
     val kind: String = ScanSnapshot.KIND_ROOM,
     val objectVolumeM3: Float? = null,
+    val name: String? = null,
+    val summary: ObjectSummary? = null,
 )
 
 /**
@@ -105,6 +112,7 @@ object ScanFiles {
                 m.room?.let { SnapshotRoom(it.outlineXZ.toFloatArray(), it.floorY, it.ceilingY, it.wallCount) },
                 File(d, MESH_NAME).takeIf { it.isFile }?.let { MeshIo.readPly(it.readBytes()) },
                 m.kind, m.objectSummary?.toSummary(),
+                m.name, m.notes, m.method, m.extras,
             )
         } catch (_: Exception) {
             null
@@ -118,7 +126,7 @@ object ScanFiles {
             try {
                 val m = json.decodeFromString(ScanMetaDto.serializer(), File(d, JSON_NAME).readText(Charsets.UTF_8))
                 val area = m.room?.let { SnapshotRoom(it.outlineXZ.toFloatArray(), it.floorY, it.ceilingY, it.wallCount).areaM2 }
-                ScanInfo(m.id, m.projectId, m.createdAt, m.pointCount, area, m.kind, m.objectSummary?.volumeM3)
+                ScanInfo(m.id, m.projectId, m.createdAt, m.pointCount, area, m.kind, m.objectSummary?.volumeM3, m.name, m.objectSummary?.toSummary())
             } catch (_: Exception) {
                 null
             }
@@ -127,12 +135,69 @@ object ScanFiles {
 
     fun delete(root: File, id: String): Boolean = dir(root, id).deleteRecursively()
 
+    // ---- object extras: thumbnail, capture video, textured mesh, editable name / notes ----
+
+    const val THUMB_NAME = "thumb.png"
+    const val VIDEO_NAME = "capture.mp4"
+    const val TEXTURED_DIR = "textured"
+
+    fun thumbFile(root: File, id: String): File = File(dir(root, id), THUMB_NAME)
+
+    fun videoFile(root: File, id: String): File = File(dir(root, id), VIDEO_NAME)
+
+    /** The planes.json text of [s] (for exports). */
+    fun metaJson(s: ScanSnapshot): String = json.encodeToString(ScanMetaDto.serializer(), meta(s))
+
+    /** Writes the thumbnail PNG bytes of a saved scan. */
+    fun saveThumbnail(root: File, id: String, png: ByteArray) {
+        val d = dir(root, id)
+        if (d.isDirectory) writeAtomic(File(d, THUMB_NAME), png)
+    }
+
+    /** Copies the capture video into the scan's directory (the source stays). */
+    fun saveVideo(root: File, id: String, source: File): Boolean {
+        val d = dir(root, id)
+        if (!d.isDirectory || !source.isFile) return false
+        source.copyTo(File(d, VIDEO_NAME), overwrite = true)
+        return true
+    }
+
+    /** Stores a textured mesh next to the grey one: textured/mesh.obj, mesh.mtl, texture.png (see [TexturedObject]). */
+    fun saveTextured(root: File, id: String, t: TexturedObject) {
+        val d = File(dir(root, id), TEXTURED_DIR)
+        if (!d.isDirectory && !d.mkdirs()) throw IOException("cannot create $d")
+        writeAtomic(File(d, "mesh.obj"), t.obj.toByteArray(Charsets.UTF_8))
+        writeAtomic(File(d, "mesh.mtl"), t.mtl.toByteArray(Charsets.UTF_8))
+        writeAtomic(File(d, "texture.png"), t.png)
+    }
+
+    fun loadTextured(root: File, id: String): TexturedObject? {
+        val d = File(dir(root, id), TEXTURED_DIR)
+        val obj = File(d, "mesh.obj"); val mtl = File(d, "mesh.mtl"); val png = File(d, "texture.png")
+        if (!obj.isFile || !mtl.isFile || !png.isFile) return null
+        return try { TexturedObject(obj.readText(Charsets.UTF_8), mtl.readText(Charsets.UTF_8), png.readBytes()) } catch (_: Exception) { null }
+    }
+
+    /** Rewrites only the name / notes of a saved scan (planes.json); false when the scan is missing. */
+    fun updateMeta(root: File, id: String, name: String? = null, notes: String? = null): Boolean {
+        val f = File(dir(root, id), JSON_NAME)
+        return try {
+            val m = json.decodeFromString(ScanMetaDto.serializer(), f.readText(Charsets.UTF_8))
+            val next = m.copy(name = name ?: m.name, notes = notes ?: m.notes)
+            writeAtomic(f, json.encodeToString(ScanMetaDto.serializer(), next).toByteArray(Charsets.UTF_8))
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun meta(s: ScanSnapshot) = ScanMetaDto(
         s.id, s.projectId, s.createdAt, s.pointCount,
         planes = s.planes.map { PlaneDto(it.kind.name, listOf(it.nx, it.ny, it.nz), it.d, it.outline.toList(), it.inlierCount) },
         room = s.room?.let { RoomDto(it.outlineXZ.toList(), it.floorY, it.ceilingY, it.wallCount) },
         kind = s.kind,
         objectSummary = s.objectSummary?.let { ObjectSummaryDto(it.lengthM, it.widthM, it.heightM, it.volumeLowM3, it.volumeHighM3, it.volumeM3) },
+        name = s.name, notes = s.notes, method = s.method, extras = s.extras,
     )
 
     // ---- PLY ----

@@ -16,6 +16,9 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Tab
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -48,6 +51,8 @@ import com.example.arruler.store.toFloorPlan
  * Full-screen 2D plan of [project]. Tap a room to select it (card with its numbers, rename and
  * delete); the share menu exports the plan. [project] null means it was deleted: goes back.
  */
+private enum class PlanTab { ROOMS, OBJECTS, SCANS }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlanScreen(
@@ -60,6 +65,9 @@ fun PlanScreen(
     scans: List<ScanInfo> = emptyList(),
     onOpenScan: (String) -> Unit = {},
     onDeleteScan: (String) -> Unit = {},
+    objects: List<ObjectItem> = emptyList(),
+    onOpenObject: (String) -> Unit = {},
+    onExportProject: () -> Unit = {},
 ) {
     if (project == null) {
         LaunchedEffect(Unit) { onBack() }
@@ -70,9 +78,7 @@ fun PlanScreen(
     var shareMenu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
-    var showScans by remember { mutableStateOf(false) }
-    // The sheet closes itself once the last scan is deleted.
-    val scansOpen = showScans && scans.isNotEmpty()
+    var tab by remember { mutableStateOf(PlanTab.ROOMS) }
 
     val plan = remember(project) { project.toFloorPlan() }
     val selectedIndex = project.rooms.indexOfFirst { it.id == selectedId }.takeIf { it >= 0 }
@@ -91,14 +97,7 @@ fun PlanScreen(
                     }
                 },
                 actions = {
-                    if (scans.isNotEmpty()) {
-                        FilterChip(
-                            selected = scansOpen,
-                            onClick = { showScans = true },
-                            label = { Text("3D (${scans.size})") },
-                        )
-                    }
-                    FilterChip(
+                    if (tab == PlanTab.ROOMS) FilterChip(
                         selected = showAngles,
                         onClick = { showAngles = !showAngles },
                         label = { Text("Angles") },
@@ -108,6 +107,11 @@ fun PlanScreen(
                             Icon(painterResource(R.drawable.ic_share), contentDescription = "Share")
                         }
                         DropdownMenu(expanded = shareMenu, onDismissRequest = { shareMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Export project to Downloads") },
+                                onClick = { shareMenu = false; onExportProject() },
+                            )
+                            HorizontalDivider()
                             ExportFormat.entries.forEach { f ->
                                 DropdownMenuItem(
                                     text = { Text(f.label) },
@@ -120,7 +124,29 @@ fun PlanScreen(
             )
         },
     ) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding)) {
+      Column(Modifier.fillMaxSize().padding(padding)) {
+        PrimaryTabRow(selectedTabIndex = tab.ordinal) {
+            Tab(selected = tab == PlanTab.ROOMS, onClick = { tab = PlanTab.ROOMS }, text = { Text("Rooms (${project.rooms.size})") })
+            Tab(selected = tab == PlanTab.OBJECTS, onClick = { tab = PlanTab.OBJECTS }, text = { Text("Objects (${objects.size})") })
+            Tab(selected = tab == PlanTab.SCANS, onClick = { tab = PlanTab.SCANS }, text = { Text("Scans (${scans.size})") })
+        }
+        when (tab) {
+        PlanTab.OBJECTS -> ObjectsGrid(objects, units, onOpenObject)
+        PlanTab.SCANS -> if (scans.isEmpty()) {
+            Text(
+                "No 3D room scans yet. Use SCAN mode on the AR screen.",
+                modifier = Modifier.padding(32.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            ScanListSection(
+                scans,
+                onOpen = onOpenScan,
+                onDelete = onDeleteScan,
+                modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState()),
+            )
+        }
+        PlanTab.ROOMS -> Box(Modifier.fillMaxSize()) {
             FloorPlanCanvas(
                 plan = plan,
                 units = units,
@@ -154,18 +180,10 @@ fun PlanScreen(
                 }
             }
         }
+        }
+      }
     }
 
-    if (scansOpen) {
-        ModalBottomSheet(onDismissRequest = { showScans = false }) {
-            ScanListSection(
-                scans,
-                onOpen = { showScans = false; onOpenScan(it) },
-                onDelete = onDeleteScan,
-                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 24.dp).verticalScroll(rememberScrollState()),
-            )
-        }
-    }
     if (renaming && selectedRoom != null) {
         TextInputDialog(
             "Rename room", selectedRoom.name, "Rename",

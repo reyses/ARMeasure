@@ -34,6 +34,22 @@ object ObjectPlacement {
 
     fun supportPlane(tap: Vec3): SupportPlane = SupportPlane.horizontal(tap.y)
 
+    /** 'Bigger' / 'Smaller' multiply all three sides by this / its inverse. */
+    const val SCALE_STEP = 1.05f
+
+    /** The box moves with a drag: the touch hit on the support plane plus the offset grabbed at the start of the drag. */
+    fun grabOffset(box: ObjectBox, hit: Vec3): Pair<Float, Float> = (box.centre.x - hit.x) to (box.centre.z - hit.z)
+
+    fun dragMove(box: ObjectBox, offset: Pair<Float, Float>, hit: Vec3): ObjectBox =
+        box.moveTo(Vec3(hit.x + offset.first, box.centre.y, hit.z + offset.second))
+
+    /** All three sides times [factor], each clamped to [MIN_SIDE]..[MAX_SIDE]; the base centre stays put. */
+    fun scaleUniform(box: ObjectBox, factor: Float): ObjectBox = box.copy(
+        w = (box.w * factor).coerceIn(MIN_SIDE, MAX_SIDE),
+        d = (box.d * factor).coerceIn(MIN_SIDE, MAX_SIDE),
+        h = (box.h * factor).coerceIn(MIN_SIDE, MAX_SIDE),
+    )
+
     /** One +/- step on [dim] (positive [deltaM] grows), clamped to [MIN_SIDE]..[MAX_SIDE]. */
     fun resize(box: ObjectBox, dim: BoxDim, deltaM: Float): ObjectBox {
         fun c(v: Float) = (v + deltaM).coerceIn(MIN_SIDE, MAX_SIDE)

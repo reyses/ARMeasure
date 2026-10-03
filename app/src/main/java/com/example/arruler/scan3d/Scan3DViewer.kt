@@ -124,13 +124,13 @@ private fun tetraGeometry(engine: Engine, s: ScanSnapshot, idx: IntArray): Geome
 }
 
 /** Indexed triangle mesh of an object scan, lit by SceneView's default light (outward counter-clockwise triangles). */
-private fun meshGeometry(engine: Engine, m: TriMesh): Geometry {
+private fun meshGeometry(engine: Engine, m: TriMesh, uv: FloatArray?): Geometry {
     val verts = ArrayList<Geometry.Vertex>(m.vertexCount)
     for (i in 0 until m.vertexCount) {
         verts += Geometry.Vertex(
             position = Float3(m.vertices[i * 3], m.vertices[i * 3 + 1], m.vertices[i * 3 + 2]),
             normal = Float3(m.normals[i * 3], m.normals[i * 3 + 1], m.normals[i * 3 + 2]),
-            uvCoordinate = Float2(0f, 0f),
+            uvCoordinate = uv?.let { Float2(it[i * 2], it[i * 2 + 1]) } ?: Float2(0f, 0f),
         )
     }
     val ind = ArrayList<Int>(m.indices.size)
@@ -157,9 +157,9 @@ private fun planeGeometry(engine: Engine, p: SnapshotPlane): Geometry {
  * camera manipulator). Toggles for Points / Surfaces / colour mode / big dots, a Top view button and a legend.
  */
 @Composable
-fun Scan3DViewer(snapshot: ScanSnapshot, onBack: () -> Unit, modifier: Modifier = Modifier) {
-    BackHandler(onBack = onBack)
-    var showPoints by remember { mutableStateOf(true) }
+fun Scan3DViewer(snapshot: ScanSnapshot, onBack: () -> Unit, modifier: Modifier = Modifier, compact: Boolean = false) {
+    BackHandler(enabled = !compact, onBack = onBack)
+    var showPoints by remember { mutableStateOf(!compact || snapshot.mesh == null) }
     var showSurfaces by remember { mutableStateOf(true) }
     var mode by remember { mutableStateOf(ColourMode.QUALITY) }
     var bigDots by remember { mutableStateOf(false) }
@@ -209,10 +209,11 @@ fun Scan3DViewer(snapshot: ScanSnapshot, onBack: () -> Unit, modifier: Modifier 
                 if (showSurfaces) {
                     snapshot.mesh?.let { mesh ->
                         key("mesh") {
-                            val geo = remember(snapshot) { meshGeometry(engine, mesh) }
+                            val geo = remember(snapshot) { meshGeometry(engine, mesh, ViewerHooks.meshUv?.invoke(snapshot)?.takeIf { it.size == mesh.vertexCount * 2 }) }
                             // colour by kind: an object is "other" (grey)
-                            val mat = remember(materialLoader) {
-                                materialLoader.createColorInstance(0xFF000000.toInt() or KindColors.rgb(PlaneKind.OTHER), 0f, 0.6f, 0.5f)
+                            val mat = remember(materialLoader, snapshot) {
+                                ViewerHooks.meshMaterial?.invoke(materialLoader, snapshot)
+                                    ?: materialLoader.createColorInstance(0xFF000000.toInt() or KindColors.rgb(PlaneKind.OTHER), 0f, 0.6f, 0.5f)
                             }
                             MeshNode(
                                 primitiveType = geo.primitiveType,
@@ -241,7 +242,7 @@ fun Scan3DViewer(snapshot: ScanSnapshot, onBack: () -> Unit, modifier: Modifier 
             }
         }
 
-        Row(
+        if (!compact) Row(
             Modifier.fillMaxWidth().statusBarsPadding().padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -256,7 +257,7 @@ fun Scan3DViewer(snapshot: ScanSnapshot, onBack: () -> Unit, modifier: Modifier 
             }
         }
 
-        Column(
+        if (!compact) Column(
             Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().padding(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -315,4 +316,14 @@ private fun Legend(mode: ColourMode, s: ScanSnapshot) {
             color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp, style = MaterialTheme.typography.bodySmall,
         )
     }
+}
+
+/**
+ * Hooks for the textured mesh (texture drone, see docs/WIRING_ROUND3.md). Set both once at start-up:
+ * [meshUv] returns two floats (u, v) per mesh vertex of the snapshot, and [meshMaterial] a material whose base colour
+ * is the texture PNG; while they are null the viewer shows the grey mesh.
+ */
+object ViewerHooks {
+    var meshMaterial: ((MaterialLoader, ScanSnapshot) -> MaterialInstance?)? = null
+    var meshUv: ((ScanSnapshot) -> FloatArray?)? = null
 }

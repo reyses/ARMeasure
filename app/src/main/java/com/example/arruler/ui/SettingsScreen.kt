@@ -19,6 +19,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -78,6 +79,10 @@ fun SettingsScreen(
     onPairText: (String) -> String?,
     onUnpair: () -> Unit,
     onTest: () -> Unit,
+    copyToDownloads: Boolean,
+    onCopyToDownloads: (Boolean) -> Unit,
+    recordVideo: Boolean,
+    onRecordVideo: (Boolean) -> Unit,
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -95,6 +100,19 @@ fun SettingsScreen(
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            Section("Saving") {
+                SwitchRow(
+                    "Copy saves to Downloads/ARMeasure",
+                    "Every save also writes plans, meshes and measurements to a folder you can open from any app.",
+                    copyToDownloads, onCopyToDownloads,
+                )
+                SwitchRow(
+                    "Record capture video",
+                    "Records each object scan as a video. It takes about 30-60 MB per minute.",
+                    recordVideo, onRecordVideo,
+                )
+            }
+
             Section("Processing") {
                 Text(
                     "Where heavy work (object meshes, big room scans) runs. Automatic uses your PC for big jobs when it is reachable.",
@@ -134,6 +152,17 @@ fun SettingsScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SwitchRow(title: String, note: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
+    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(note, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(checked = checked, onCheckedChange = onChecked)
     }
 }
 

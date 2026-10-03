@@ -81,6 +81,13 @@ class ScanSnapshot(
     /** [KIND_ROOM] or [KIND_OBJECT]. */
     val kind: String = KIND_ROOM,
     val objectSummary: ObjectSummary? = null,
+    /** User-visible name of a saved object ('Object 3'); null for room scans and old saves. */
+    val name: String? = null,
+    val notes: String? = null,
+    /** How the object was computed ('phone, 3.2 s'). */
+    val method: String? = null,
+    /** Extra result lines (primitive fit), stored as 'label: value'. */
+    val extras: List<String> = emptyList(),
 ) {
     init {
         require(points.size % 3 == 0) { "points must be packed xyz" }
