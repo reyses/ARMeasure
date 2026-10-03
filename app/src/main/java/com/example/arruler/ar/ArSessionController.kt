@@ -1,23 +1,36 @@
 package com.example.arruler.ar
 
+import android.net.Uri
+import android.util.Log
 import com.example.arruler.measure.MeasurePoint
 import com.google.ar.core.Anchor
+import com.google.ar.core.Config
 import com.google.ar.core.HitResult
+import com.google.ar.core.PlaybackStatus
 import com.google.ar.core.Plane
+import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import io.github.sceneview.ar.ARSceneView
+import io.github.sceneview.ar.arcore.ARSession
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Owns the [ARSceneView]: per-frame updates, plane hit testing, anchors and tracking state.
- * Does not draw anything; drawing is [ArRenderer]'s job.
+ * Owns the [ARSceneView]: per-frame updates, plane hit testing, anchors, tracking state,
+ * recording ([recorder]) and dataset playback. Does not draw anything; drawing is [ArRenderer]'s job.
  */
 class ArSessionController(private val arView: ARSceneView) {
 
     /** A hit on a detected plane, with its world position in meters. */
     class PlaneHit(val hitResult: HitResult, val point: MeasurePoint)
+
+    companion object {
+        private const val TAG = "ArSessionController"
+
+        /** Flip to Config.FocusMode.AUTO to go back to autofocus. */
+        val FOCUS_MODE: Config.FocusMode = Config.FocusMode.FIXED
+    }
 
     private val _hasSurface = MutableStateFlow(false)
     /** True while the screen centre points at a detected plane. */
@@ -25,6 +38,23 @@ class ArSessionController(private val arView: ARSceneView) {
 
     private val _trackingState = MutableStateFlow(TrackingState.STOPPED)
     val trackingState: StateFlow<TrackingState> = _trackingState.asStateFlow()
+
+    private val _playbackStatus = MutableStateFlow(PlaybackStatus.NONE)
+    /** NONE while the live camera is used; OK / FINISHED / IO_ERROR while a dataset plays. */
+    val playbackStatus: StateFlow<PlaybackStatus> = _playbackStatus.asStateFlow()
+
+    /** Last session seen via the SceneView callbacks. */
+    private var knownSession: Session? = null
+    private var pendingPlayback: Uri? = null
+
+    /**
+     * The live ARCore session: `ARSceneView.session` (an [ARSession], which extends [Session]),
+     * falling back to the one captured from the callbacks.
+     */
+    private fun currentSession(): Session? =
+        runCatching<Session?> { arView.session }.getOrNull() ?: knownSession
+
+    val recorder = SessionRecorder(arView.context, ::currentSession)
 
     private val anchors = mutableListOf<Anchor>()
 
@@ -36,7 +66,22 @@ class ArSessionController(private val arView: ARSceneView) {
 
     init {
         arView.planeRenderer.isEnabled = false
-        arView.onSessionUpdated = { _, frame ->
+        arView.sessionConfiguration = { session, config ->
+            config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
+            config.focusMode = FOCUS_MODE
+            // Depth stays disabled; just learn whether the device supports it.
+            val depthOk = session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)
+            Log.i(TAG, "Depth AUTOMATIC supported on this device: $depthOk")
+        }
+        arView.onSessionCreated = { session ->
+            knownSession = session
+            pendingPlayback?.let { uri -> pendingPlayback = null; applyPlayback(session, uri) }
+        }
+        arView.onSessionPaused = { recorder.onSessionPaused() }
+        arView.onSessionUpdated = { session, frame ->
+            knownSession = session
+            recorder.onFrame(session, frame)
+            _playbackStatus.value = session.playbackStatus
             _trackingState.value = frame.camera.trackingState
             _hasSurface.value = hitTestCenter() != null
             onFrame?.invoke()
@@ -44,6 +89,34 @@ class ArSessionController(private val arView: ARSceneView) {
         arView.setOnGestureListener(
             onSingleTapConfirmed = { event, _ -> onTap?.invoke(event.x, event.y) }
         )
+    }
+
+    /**
+     * Plays an MP4 dataset instead of the camera: pause -> setPlaybackDatasetUri -> resume.
+     * If the session does not exist yet the request is applied when it is created.
+     * Returns false if ARCore rejected the dataset.
+     */
+    fun startPlayback(uri: Uri): Boolean {
+        recorder.stop()
+        val session = currentSession()
+        if (session == null) {
+            pendingPlayback = uri
+            return true
+        }
+        return applyPlayback(session, uri)
+    }
+
+    private fun applyPlayback(session: Session, uri: Uri): Boolean = try {
+        val wasResumed = (session as? ARSession)?.isResumed ?: true
+        if (wasResumed) session.pause()
+        session.setPlaybackDatasetUri(uri)
+        if (wasResumed) session.resume()
+        _playbackStatus.value = PlaybackStatus.OK
+        true
+    } catch (e: Exception) {
+        Log.e(TAG, "Playback failed for $uri", e)
+        _playbackStatus.value = PlaybackStatus.IO_ERROR
+        false
     }
 
     fun hitTestCenter(): PlaneHit? = hitTest(arView.width / 2f, arView.height / 2f)

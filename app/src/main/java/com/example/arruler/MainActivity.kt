@@ -1,6 +1,16 @@
 package com.example.arruler
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import com.google.ar.core.PlaybackStatus
+import com.example.arruler.ar.RecordingFiles
+import com.example.arruler.ar.RecordingState
+import com.example.arruler.ar.TrackEvent
+import com.example.arruler.ui.PlaybackBadge
+import com.example.arruler.ui.RecordControl
 import android.view.HapticFeedbackConstants
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
@@ -35,6 +45,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var ar: ArSessionController
     private lateinit var renderer: ArRenderer
     private val session = MeasurementSession()
+    private var pointCount = 0
+
+    private val pickPlayback = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) launchPlayback(uri)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -46,6 +61,18 @@ class MainActivity : AppCompatActivity() {
         renderer = ArRenderer(binding.arSceneView)
         ar.onFrame = ::onArFrame
         ar.onTap = ::onArTap
+        handlePlaybackIntent(intent)
+
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                var last = PlaybackStatus.NONE
+                ar.playbackStatus.collect { st ->
+                    if (st == PlaybackStatus.FINISHED && last != st) toast("Playback finished")
+                    if (st == PlaybackStatus.IO_ERROR && last != st) toast("Playback error")
+                    last = st
+                }
+            }
+        }
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -58,9 +85,17 @@ class MainActivity : AppCompatActivity() {
         binding.composeView.setContent {
             val state by session.state.collectAsState()
             val hasSurface by ar.hasSurface.collectAsState()
+            val recState by ar.recorder.state.collectAsState()
+            val playback by ar.playbackStatus.collectAsState()
             MaterialTheme {
                 Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars)) {
                     MeasureOverlay(state, hasSurface)
+                    RecordControl(
+                        state = recState,
+                        onToggle = ar.recorder::toggle,
+                        onPlayback = ::pickPlaybackFile,
+                    )
+                    if (playback != PlaybackStatus.NONE) PlaybackBadge(playback == PlaybackStatus.FINISHED)
                     ControlsBar(
                         state = state,
                         onToggleUnit = session::nextUnit,
@@ -74,6 +109,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        ar.recorder.stop()
         renderer.release()
         ar.releaseAnchors()
         super.onDestroy()
@@ -92,7 +128,9 @@ class MainActivity : AppCompatActivity() {
         if (s.phase != Phase.MEASURING || s.points.isEmpty()) return
         val hit = ar.hitTest(x, y) ?: return
         haptic()
-        session.addPoint(ar.createAnchor(hit))
+        val p = ar.createAnchor(hit)
+        logPoint(p)
+        session.addPoint(p)
     }
 
     private fun onMainButton() {
@@ -104,7 +142,10 @@ class MainActivity : AppCompatActivity() {
         if (session.state.value.points.isNotEmpty()) clearAll()
         val hit = ar.hitTestCenter() ?: return
         haptic()
-        session.start(ar.createAnchor(hit))
+        val p = ar.createAnchor(hit)
+        pointCount = 0
+        logPoint(p)
+        session.start(p)
     }
 
     private fun clearAll() {
@@ -158,5 +199,34 @@ class MainActivity : AppCompatActivity() {
 
     private fun haptic() {
         binding.root.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handlePlaybackIntent(intent)
+    }
+
+    /** adb: am start -n com.example.arruler/.MainActivity --es playback_uri <uri or /abs/path> */
+    private fun handlePlaybackIntent(intent: Intent?) {
+        val raw = RecordingFiles.normalizePlaybackUri(intent?.getStringExtra(EXTRA_PLAYBACK_URI)) ?: return
+        intent?.removeExtra(EXTRA_PLAYBACK_URI)
+        launchPlayback(Uri.parse(raw))
+    }
+
+    private fun pickPlaybackFile() = pickPlayback.launch(arrayOf("video/mp4"))
+
+    private fun launchPlayback(uri: Uri) {
+        if (!ar.startPlayback(uri)) toast("Could not open recording")
+    }
+
+    private fun logPoint(p: com.example.arruler.measure.MeasurePoint) {
+        ar.recorder.log(TrackEvent.PointPlaced(pointCount++, p.x, p.y, p.z, System.currentTimeMillis()))
+    }
+
+    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+
+    companion object {
+        const val EXTRA_PLAYBACK_URI = "playback_uri"
     }
 }
