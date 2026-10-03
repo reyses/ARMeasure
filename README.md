@@ -1,4 +1,4 @@
-# AR Ruler App
+﻿# AR Ruler App
 
 A production-ready AR ruler application optimized for Android flagship devices, including Google Pixel 11 Pro.
 
@@ -12,16 +12,17 @@ A production-ready AR ruler application optimized for Android flagship devices, 
 - 📱 Fully compatible with Pixel 11 Pro display cutouts, gesture navigation, and 64-bit architecture
 
 ## Requirements
-- Android Studio Ladybug or later
+ - Android Studio Rabbit 1 (2026.2.1, build 262.x) or newer; this is the build the project was verified with (Google's AGP 9.4 notes do not state a minimum Studio version)
+ - Gradle 9.8.0 (wrapper), Android Gradle Plugin 9.4.1, Kotlin 2.4.20
 - Android device with ARCore support (e.g., Pixel 11 Pro, Pixel 9/10 series)
 - Minimum SDK: 24 (Android 7.0)
-- Target SDK: 35 (Android 15+)
-- Java JDK 17
+ - Compile SDK: 37, Target SDK: 37
+ - JDK 21: the Gradle daemon JVM is pinned in gradle/gradle-daemon-jvm.properties and auto-downloaded via the foojay toolchain resolver; Java/Kotlin target is 21. Any JDK 17+ (e.g. Android Studio's bundled JBR) can launch the wrapper.
 
 ## Compatibility & Optimization Highlights
 - **Pixel 11 Pro Compatible:** Supports camera punch-hole / display cutout insets and gesture navigation bar via `WindowInsetsCompat`.
 - **64-bit Architecture:** Native ABI filters tuned for `arm64-v8a` and `x86_64`.
-- **Target SDK 35:** Built to comply with Android 15 Edge-to-Edge display enforcement and modern Android security guidelines.
+- **Target SDK 37:** Built to comply with Android 15+ Edge-to-Edge display enforcement and modern Android security guidelines.
 - **ARCore 1.45+:** Updated tracking and camera framework support.
 
 ## Build Instructions

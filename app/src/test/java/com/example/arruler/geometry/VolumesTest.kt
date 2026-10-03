@@ -1,4 +1,4 @@
-package com.example.arruler.geometry
+﻿package com.example.arruler.geometry
 
 import kotlin.math.PI
 import kotlin.math.sqrt
@@ -29,22 +29,22 @@ class VolumesTest {
 
     @Test fun shapes() {
         val box = Shape.Box(2f, 3f, 4f)
-        Tol.near(24f, box.volume()); Tol.near(52f, box.surfaceArea()!!)
+        Tol.near(24f, box.volume()); Tol.near(52f, box.surfaceArea())
 
         val cyl = Shape.Cylinder(1f, 2f)
-        Tol.near(Volumes.cylinder(1f, 2f), cyl.volume()); Tol.near(2f * pi * 3f, cyl.surfaceArea()!!, 1e-3f)
+        Tol.near(Volumes.cylinder(1f, 2f), cyl.volume()); Tol.near(2f * pi * 3f, cyl.surfaceArea(), 1e-3f)
 
         val cone = Shape.Cone(3f, 4f) // slant 5
-        Tol.near(Volumes.cone(3f, 4f), cone.volume()); Tol.near(pi * 3f * 8f, cone.surfaceArea()!!, 1e-3f)
+        Tol.near(Volumes.cone(3f, 4f), cone.volume()); Tol.near(pi * 3f * 8f, cone.surfaceArea(), 1e-3f)
 
         val sph = Shape.Sphere(1.5f)
-        Tol.near(Volumes.sphere(1.5f), sph.volume()); Tol.near(4f * pi * 2.25f, sph.surfaceArea()!!, 1e-3f)
+        Tol.near(Volumes.sphere(1.5f), sph.volume()); Tol.near(4f * pi * 2.25f, sph.surfaceArea(), 1e-3f)
 
         val fr = Shape.Frustum(3f, 0f, 4f) // degenerate to cone: slant 5
         Tol.near(Volumes.cone(3f, 4f), fr.volume(), 1e-3f)
-        Tol.near(cone.surfaceArea()!!, fr.surfaceArea()!!, 1e-3f)
+        Tol.near(cone.surfaceArea(), fr.surfaceArea(), 1e-3f)
         val fr2 = Shape.Frustum(2f, 1f, 3f)
-        Tol.near(pi * (4f + 1f + 3f * sqrt(10f)), fr2.surfaceArea()!!, 1e-3f)
+        Tol.near(pi * (4f + 1f + 3f * sqrt(10f)), fr2.surfaceArea(), 1e-3f)
 
         val pyr = Shape.Pyramid(4f, 3f)
         Tol.near(4f, pyr.volume()); assertNull(pyr.surfaceArea())
@@ -52,6 +52,6 @@ class VolumesTest {
         val sq = Polygon3(listOf(Vec3(0f, 0f, 0f), Vec3(2f, 0f, 0f), Vec3(2f, 0f, 2f), Vec3(0f, 0f, 2f)))
         val ex = Shape.ExtrudedPolygon(sq, 3f)
         Tol.near(12f, ex.volume(), 1e-3f)
-        Tol.near(2f * 4f + 8f * 3f, ex.surfaceArea()!!, 1e-3f)
+        Tol.near(2f * 4f + 8f * 3f, ex.surfaceArea(), 1e-3f)
     }
 }

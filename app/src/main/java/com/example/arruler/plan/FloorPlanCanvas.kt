@@ -1,4 +1,4 @@
-package com.example.arruler.plan
+﻿package com.example.arruler.plan
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.rememberTransformableState
@@ -40,7 +40,7 @@ fun FloorPlanCanvas(
 ) {
     var zoom by remember { mutableStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
-    val state = rememberTransformableState { zoomChange, panChange, _ ->
+    val state = rememberTransformableState { _, zoomChange, panChange, _ ->
         zoom = (zoom * zoomChange).coerceIn(0.4f, 12f)
         pan += panChange
     }
