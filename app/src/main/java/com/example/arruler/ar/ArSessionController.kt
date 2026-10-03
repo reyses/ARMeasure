@@ -347,7 +347,6 @@ class ArSessionController(
         Plane.Type.HORIZONTAL_UPWARD_FACING -> SurfaceKind.FLOOR
         Plane.Type.HORIZONTAL_DOWNWARD_FACING -> SurfaceKind.CEILING
         Plane.Type.VERTICAL -> SurfaceKind.WALL
-        null -> SurfaceKind.OTHER
     }
 
     /** The pose's Y axis is the surface normal for depth and oriented feature points. */
