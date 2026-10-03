@@ -1,0 +1,94 @@
+package com.example.arruler.ml
+
+import android.content.Context
+import android.graphics.ImageFormat
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import android.media.Image
+import com.google.ar.core.Frame
+import com.google.ar.core.exceptions.NotYetAvailableException
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.objects.ObjectDetection
+import com.google.mlkit.vision.objects.ObjectDetector
+import com.google.mlkit.vision.objects.defaults.ObjectDetectorOptions
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.suspendCancellableCoroutine
+
+/**
+ * 2D object proposals for tap-to-box: ML Kit Object Detection (stable `com.google.mlkit:object-detection:17.0.2`,
+ * bundled base model: fully on-device, offline from the first launch, no Play-services download).
+ * SINGLE_IMAGE mode, multiple objects, classification on: [Detection.label] / [Detection.confidence] carry the coarse
+ * ML Kit class (Home good, Fashion good, Food, Place, Plant) of the most confident label, null / 0 when unclassified.
+ *
+ * Use [capture] on the frame callback thread (it copies the ARCore CPU image to NV21 and closes the Image in a
+ * finally block), then [detect] on any coroutine. [warmUp] is a no-op kept for API compatibility. Call [close] when the screen goes away.
+ *
+ * Orientation: see [ImageOrientation]. The returned [Detection] boxes are mapped back to the sensor image
+ * (IMAGE_PIXELS), the same space as `Frame.transformCoordinates2d(VIEW -> IMAGE_PIXELS)` and Camera.getImageIntrinsics().
+ */
+class MlObjectDetector : AutoCloseable {
+    private val detector: ObjectDetector = ObjectDetection.getClient(
+        ObjectDetectorOptions.Builder()
+            .setDetectorMode(ObjectDetectorOptions.SINGLE_IMAGE_MODE)
+            .enableMultipleObjects()
+            .enableClassification()
+            .build()
+    )
+
+    /** The model is bundled, nothing to download. */
+    @Suppress("RedundantSuspendModifier")
+    suspend fun warmUp() {}
+    /** NV21 copy of one CPU camera image; [rotationDegrees] = clockwise turn to upright (see [ImageOrientation]). */
+    class Capture(val nv21: ByteArray, val width: Int, val height: Int, val rotationDegrees: Int)
+
+    /**
+     * Copies `frame.acquireCameraImage()` (YUV_420_888) into NV21; the Image is closed before returning.
+     * [displayRotation] = Display.getRotation() (Surface.ROTATION_*), [sensorOrientation] = [MlObjectDetector.sensorOrientation].
+     * Null when the image is not available yet.
+     */
+    fun capture(frame: Frame, displayRotation: Int, sensorOrientation: Int): Capture? {
+        var image: Image? = null
+        try {
+            image = try { frame.acquireCameraImage() } catch (_: NotYetAvailableException) { return null }
+            if (image.format != ImageFormat.YUV_420_888) return null
+            val p = image.planes
+            val nv21 = ImageOrientation.toNv21(
+                image.width, image.height, p[0].buffer, p[0].rowStride, p[1].buffer, p[2].buffer, p[1].rowStride, p[1].pixelStride,
+            )
+            val rot = ImageOrientation.rotationDegrees(sensorOrientation, ImageOrientation.surfaceRotationDegrees(displayRotation))
+            return Capture(nv21, image.width, image.height, rot)
+        } finally {
+            image?.close()
+        }
+    }
+
+    /** Detections in sensor IMAGE_PIXELS; empty when nothing was found. */
+    suspend fun detect(c: Capture): List<Detection> {
+        val input = InputImage.fromByteArray(c.nv21, c.width, c.height, c.rotationDegrees, InputImage.IMAGE_FORMAT_NV21)
+        val found = suspendCancellableCoroutine { cont ->
+            detector.process(input)
+                .addOnSuccessListener { cont.resume(it) }
+                .addOnFailureListener { cont.resumeWithException(it) }
+        }
+        return found.map { o ->
+            val b = o.boundingBox
+            val r = ImageOrientation.uprightBoxToImage(
+                b.left.toFloat(), b.top.toFloat(), b.right.toFloat(), b.bottom.toFloat(), c.width, c.height, c.rotationDegrees,
+            )
+            val best = o.labels.maxByOrNull { it.confidence }
+            Detection(r[0], r[1], r[2], r[3], best?.text, best?.confidence ?: 0f, o.trackingId)
+        }
+    }
+
+    override fun close() = detector.close()
+    companion object {
+        /** CameraCharacteristics.SENSOR_ORIENTATION of [cameraId] (use `session.cameraConfig.cameraId`); 90 if unknown. */
+        fun sensorOrientation(context: Context, cameraId: String): Int = try {
+            val cm = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            cm.getCameraCharacteristics(cameraId).get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+        } catch (_: Exception) {
+            90
+        }
+    }
+}
