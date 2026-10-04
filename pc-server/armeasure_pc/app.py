@@ -9,11 +9,12 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel
 from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from . import __version__, config, devlink
+from . import __version__, bundles, config, devlink
 from .access import AccessGuard, AddressFilter, JsonlLog, Lockout
 from .auth import check_bearer, require_auth
 from .jobs import JobManager, normalize_type
@@ -30,6 +31,12 @@ CODES = {400: "bad_request", 401: "unauthorized", 403: "forbidden", 404: "not_fo
 def err(status: int, message: str, headers: dict | None = None) -> JSONResponse:
     return JSONResponse({"error": {"code": CODES.get(status, "internal"), "message": message}}, status,
                         headers)
+
+
+class CreateBundle(BaseModel):
+    name: str = "bundle.zip"
+    size: int
+    sha256: str
 
 
 class _TooLarge(Exception):
@@ -256,6 +263,39 @@ def create_app(data_dir: Path | None = None, token: str | None = None, max_uploa
             raise HTTPException(413, "log upload too large")
         header = f"# app={app_id or 'unknown'} commit={commit} device={device} kind={kind}\n".encode()
         return {"id": devlink.store_log(data_dir, kind, device, header + content)}
+
+    store = bundles.BundleStore(data_dir)
+    app.state.bundles = store
+
+    def _bundle_call(fn, *a):
+        try:
+            return fn(*a)
+        except bundles.BundleError as e:
+            raise HTTPException(e.status, e.message) from None
+
+    @app.post("/v1/dev/bundles", dependencies=auth)
+    def bundle_create(body: CreateBundle):
+        return _bundle_call(store.create, body.name, body.size, body.sha256)
+
+    @app.put("/v1/dev/bundles/{bid}/chunks/{n}", dependencies=auth)
+    async def bundle_chunk(bid: str, n: int, request: Request):
+        cl = request.headers.get("content-length")
+        if cl and cl.isdigit() and int(cl) > store.chunk_size:
+            raise HTTPException(413, f"chunk exceeds {store.chunk_size} bytes")
+        data = bytearray()
+        async for part in request.stream():
+            data += part
+            if len(data) > store.chunk_size:
+                raise HTTPException(413, f"chunk exceeds {store.chunk_size} bytes")
+        return _bundle_call(store.put_chunk, bid, n, bytes(data))
+
+    @app.get("/v1/dev/bundles/{bid}", dependencies=auth)
+    def bundle_status(bid: str):
+        return _bundle_call(store.status, bid)
+
+    @app.post("/v1/dev/bundles/{bid}/complete", dependencies=auth)
+    def bundle_complete(bid: str):
+        return _bundle_call(store.complete, bid)
 
     def _job_or_404(job_id: str) -> dict:
         meta = jm.get(job_id)
