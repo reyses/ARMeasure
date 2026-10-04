@@ -59,7 +59,7 @@ Contents: `logs` = a header line (app, version, commit, build type, device, Andr
 
 200 (or 201) `{"id": "<opaque string>"}`; the phone shows it ("Sent. logs id ..., diagnostics id ...").
 
-Storage (as implemented in pc-server/armeasure_pc/devlink.py, 2026-10-03): `pc-server\data\devlogs\<yyyy-mm-dd>\<id>-<kind>-<device>.txt` holding the uploaded file's bytes. `id` = `<kind-first-letter>-<yyyymmdd-HHmmss>-<4 random hex>` (e.g. `L-20261003-101500-9f3a`). The device name is sanitised to `[A-Za-z0-9._-]`, max 40 chars. Uploads over 20 MB get 413; the newest 500 uploads are kept. The `app`, `commit` and client address are not stored next to the file (the request itself is in `data\access.log`); the phone should therefore put app + commit in the first lines of the uploaded text.
+Storage (as implemented in pc-server/armeasure_pc/devlink.py, 2026-10-03): `pc-server\data\devlogs\<yyyy-mm-dd>\<id>-<kind>-<device>.txt` holding the uploaded file's bytes. `id` = `<kind-first-letter>-<yyyymmdd-HHmmss>-<4 random hex>` (e.g. `L-20261003-101500-9f3a`). The device name is sanitised to `[A-Za-z0-9._-]`, max 40 chars. Uploads over 20 MB get 413; the newest 500 uploads are kept. The server prepends one header line `# app=<app> commit=<commit> device=<device> kind=<kind>` from the multipart fields; the client address is in `data\access.log`.
 
 ## Notes
 

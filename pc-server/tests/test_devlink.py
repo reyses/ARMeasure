@@ -120,7 +120,8 @@ def test_logs_upload(dev, tmp_path):
     assert lid.startswith("L-") and len(lid.split("-")) == 4
     files = list((tmp_path / "data" / "devlogs").glob("*/*.txt"))
     assert len(files) == 1 and files[0].name == f"{lid}-logs-Google_Pixel_11_Pro.txt"
-    assert files[0].read_bytes() == b"hello"
+    assert files[0].read_bytes() == (b"# app=com.example.arruler commit=506a405 "
+                                     b"device=Google Pixel 11 Pro kind=logs\nhello")
     assert post("crash").json()["id"].startswith("C-") and post("diagnostics").json()["id"].startswith("D-")
     assert post("weird").status_code == 400
     assert post("logs", device="../../evil\\x").status_code == 200

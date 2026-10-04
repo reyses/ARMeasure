@@ -254,7 +254,8 @@ def create_app(data_dir: Path | None = None, token: str | None = None, max_uploa
         content = await file.read(app.state.max_dev_log + 1)
         if len(content) > app.state.max_dev_log:
             raise HTTPException(413, "log upload too large")
-        return {"id": devlink.store_log(data_dir, kind, device, content)}
+        header = f"# app={app_id or 'unknown'} commit={commit} device={device} kind={kind}\n".encode()
+        return {"id": devlink.store_log(data_dir, kind, device, header + content)}
 
     def _job_or_404(job_id: str) -> dict:
         meta = jm.get(job_id)
