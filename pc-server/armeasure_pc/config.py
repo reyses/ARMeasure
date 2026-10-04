@@ -40,6 +40,11 @@ MAX_DEV_LOG_BYTES = 20 * 1024 * 1024
 DEV_LOG_KEEP = 500
 TAILSCALE = Path(r"C:\Program Files\Tailscale\tailscale.exe")
 
+# ---- Beam bundles (docs/BEAM.md) ----
+BUNDLE_MAX_BYTES = 4 * 1024 ** 3
+BUNDLE_CHUNK_BYTES = 8 * 1024 * 1024
+BUNDLE_KEEP = 50
+
 # ---- access control ----
 LOCKOUT_FAILURES = 10
 LOCKOUT_WINDOW_S = 600

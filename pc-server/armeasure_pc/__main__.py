@@ -52,8 +52,31 @@ def import_drone(argv) -> int:
     return 0
 
 
+def inspect_bundle_cmd(argv) -> int:
+    """python -m armeasure_pc inspect-bundle <folder|latest> [--no-video]: summary.md, contact_sheet.jpg, video_frames/, timeline.html."""
+    from . import bundle_inspect
+    from .bundles import BundleStore
+    ap = argparse.ArgumentParser(prog="armeasure_pc inspect-bundle",
+                                 description="Digest a Beam bundle folder (data/devbundles/<date>/<session>) for the developer.")
+    ap.add_argument("target", help="a bundle folder, or 'latest' for the newest one under data/devbundles")
+    ap.add_argument("--data-dir", type=Path, default=config.DEFAULT_DATA_DIR)
+    ap.add_argument("--no-video", action="store_true", help="skip ffmpeg frame extraction")
+    args = ap.parse_args(argv)
+    d = BundleStore(args.data_dir).latest() if args.target == "latest" else Path(args.target)
+    if d is None or not Path(d).is_dir():
+        print(f"error: no bundle folder ({args.target})", file=sys.stderr)
+        return 2
+    out = bundle_inspect.inspect_bundle(Path(d), video=not args.no_video)
+    print(f"bundle: {d}")
+    for k, v in out.items():
+        print(f"  {k}: {v}")
+    return 0
+
+
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
+    if argv and argv[0] == "inspect-bundle":
+        return inspect_bundle_cmd(argv[1:])
     if argv and argv[0] == "import-drone":
         return import_drone(argv[1:])
     ap = argparse.ArgumentParser(prog="armeasure_pc")

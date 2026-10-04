@@ -47,6 +47,23 @@ Same bearer auth as everything else.
   `{"id":"L-20261003-101500-9f3a"}`. (DEV_LINK.md names `D:\ARMeasure-logs\...` with meta.json and an 8 MB cap; this server
   follows the PC-guard brief instead.)
 
+## Beam: session bundles from the phone (docs/BEAM.md)
+
+The debug app sends one ZIP per session (event timeline, window snapshots, ARCore recording MP4, exports, logcat, crash) in
+8 MB chunks, resumable, same bearer auth and lockout.
+
+- `POST /v1/dev/bundles` `{name,size,sha256}` -> `{id,chunk_size,chunks,received,state}` (413 above 4 GB; the same sha256 resumes);
+  `PUT /v1/dev/bundles/{id}/chunks/{n}` raw bytes; `GET /v1/dev/bundles/{id}` -> received chunks;
+  `POST /v1/dev/bundles/{id}/complete` -> sha256 verified (422 on mismatch, 409 when chunks are missing), then unpacked
+  (zip-slip and symlink safe) to `data\devbundles\<YYYY-MM-DD>\<session-id>\`; incoming chunks deleted; newest 50 kept
+  (`config.BUNDLE_KEEP`).
+- `python -m armeasure_pc inspect-bundle <folder|latest> [--no-video]` writes into that folder: `summary.md` (manifest, timeline
+  digest, last 50 events, errors with stacks, analyze results), `contact_sheet.jpg`, `video_frames/` (1 frame/s from the ARCore
+  and screen MP4 with the bundled ffmpeg of `imageio-ffmpeg==0.6.0`) and `timeline.html` (events on a time axis with the nearest
+  snapshot beside each). Read `summary.md` first.
+- Tests: `tests/test_bundles.py` (chunking, resume, sha mismatch, zip-slip, retention, inspector on a synthetic bundle with an
+  ffmpeg-made MP4).
+
 ## Access log, auth failures, lockout
 
 - `data\access.log`: JSON lines `{ts, ip, method, path, status[, peer]}` for every request (5 MB x 6 rotating files). `ip` is

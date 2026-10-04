@@ -4,7 +4,25 @@
     <!-- Debug builds only: the dev link installs APKs fetched from the owner's PC (docs/DEV_LINK.md) -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- Debug builds only: Beam (docs/BEAM.md) records its own session data and sends it to the owner's PC -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application>
+        <activity
+            android:name=".beam.BeamConsentActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <service
+            android:name=".beam.BeamProjectionService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+        <service
+            android:name=".beam.BeamUploadJobService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
         <receiver
             android:name=".devlink.InstallResultReceiver"
             android:exported="false" />
