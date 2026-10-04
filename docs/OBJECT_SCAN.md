@@ -63,14 +63,34 @@ height above the plane (after denoise the flat top is exact; a sharp apex (cone)
 
 ## Accuracy expectations on depth-from-motion (Pixel, no ToF)
 
-Measured on synthetic scenes (seeded, isotropic Gaussian noise, ~3-4 samples per voxel face cell, 2 % outliers, floor):
+Measured on synthetic scenes only (seeded, isotropic Gaussian noise, 3 samples per voxel face cell, 2 % outliers, table points
+adjacent to the object; `FootprintAccuracyTest`, harness `FootprintBiasHarness`). Footprint = oriented-rectangle length / width error
+in mm (measured - true, per dimension), mean over seeds:
 
 | Object | noise | preset | footprint | height | hull volume | mesh volume |
 |---|---|---|---|---|---|---|
-| cube 200 mm | 4 mm | QUICK | +3 mm | +1.5 mm | +4 % | -0.4 % |
-| cube 200 mm | 4 mm | FINE | +5 mm | +1 mm | +3 % | -0.4 % |
-| cylinder r 100 h 200 | 4 mm | FINE | -0.5 mm | +0.7 mm | +1.6 % | -0.8 % |
-| box 500 x 300 x 400 | 3 mm | QUICK | +2 mm | +1 mm | +1.7 % | -0.2 % |
+| cube 200 mm | 4 mm | QUICK | +2.2 mm (worst side +3.6) | +3.5 mm | +4.3 % | -0.5 % |
+| cube 200 mm | 4 mm | FINE | +0.9 mm (worst side +1.1) | +0.6 mm | +2.5 % | -0.5 % |
+| cube 200 mm | 2 mm | FINE | +0.5 mm | +0.3 mm | +2.3 % | -0.6 % |
+| cylinder r 100 h 200 | 4 mm | FINE | -0.8 mm | +0.6 mm | | |
+| box 500 x 300 x 400 | 4 mm | FINE | +1.0 / +1.1 mm | | +2.2 % | |
+| box 500 x 300 x 400 | 4 mm | QUICK | +2.2 / +2.7 mm | | +4.1 % | |
+
+Residual footprint bias is about +0.25 sigma per side at FINE and +0.3 sigma at QUICK (noise up to 4 mm; 20 seeds, sizes 100 / 200 /
+400 mm, yaw 0 / 30 deg all agree within the seed sd of 0.1-0.7 mm). It does not depend on object size or yaw. At 6 mm noise the
+12 mm denoise ball is only 2 sigma and the footprint reads +2.9 mm (FINE) / +6.5 mm (QUICK): out of the designed range.
+
+Where the footprint error comes from (200 mm cube, FINE, 4 mm noise, length error): raw noisy points +18.0 mm (the outermost 0.25 %
+of a Gaussian slab is ~2.25 sigma out per side), after voxel means +18.9, after the local-plane denoise +3.5, after isolation
+(outlier removal) +1.0 with no table points near the object, and **+4.4 with them**. The table points were the cause of the
+reported +4-5 mm: next to a wall the denoise mixes wall and floor neighbours and lifts floor fuzz into a fillet 5-18 mm high that
+survives the 5 mm support margin and extends up to the box slack. The footprint rectangle now ignores points below
+`ObjectMeasures.FLOOR_GATE` (18 mm = 1.5 x the denoise ball, capped at a quarter of the object height); volumes still use all points.
+Cost: an object that widens toward its base (cone, pile) reads its width at the gate height. Quantile choice and voxelisation are
+second order (+0.3-0.8 mm each).
+
+Hull volume is a closed-hull check now: the incremental quickhull produced a non-manifold surface on nearly coplanar denoised faces
+once in 20 seeds (hull +845 %); the build is verified and redone on a 1e-6 .. 1e-4 jittered copy (2 attempts were enough).
 
 Real data adds what the synthetic data lacks: scale drift of the visual-inertial tracking (typically 1-2 % of the camera path), plane
 error (a tilted table), gaps (shiny, dark or textureless surfaces get no depth), noise that is correlated between frames rather than
@@ -78,8 +98,8 @@ independent (averaging does not remove it), and moving objects. Expect roughly: 
 volume; 50 mm object, +-3-5 mm and +-25 % volume (noise is then 10 % of the size); furniture (> 0.5 m) +-1-2 cm and +-5 % (tracking
 drift dominates). Below about 5 cm the noise exceeds the denoise ball and the result should be labelled indicative.
 
-Known behaviours: the denoise rounds sharp edges by ~2-3 mm (volume reads a fraction of a percent low on a perfect box); without a
-floor next to the object the denoise has no plane to anchor the base and the footprint reads ~2 mm larger.
+Known behaviours: the denoise rounds sharp edges by ~2-3 mm (volume reads a fraction of a percent low on a perfect box); the mesh
+volume of a 100 mm object reads ~5 % low (closing radius); the floor gate costs a tapered base (see above).
 
 ## Performance (JVM desktop, single thread, FINE 3 mm)
 

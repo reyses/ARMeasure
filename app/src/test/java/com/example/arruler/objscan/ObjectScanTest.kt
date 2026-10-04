@@ -40,14 +40,14 @@ class ObjectScanTest {
         val s = Fixtures.boxScene(Random(11), 0.5f, 0.3f, 0.4f, 0f, 0.003f, ObjectQuality.QUICK.voxelSize)
         val r = Fixtures.run(s, Fixtures.userBox(0.5f, 0.3f, 0.4f, 0f, 0.01f), ObjectQuality.QUICK)
         dump("box0", r)
-        checkBox(r, 0.5f, 0.3f, 0.4f, 0.01f, 0.05)
+        checkBox(r, 0.5f, 0.3f, 0.4f, 0.006f, 0.05)
     }
 
     @Test fun boxYawed30() {
         val s = Fixtures.boxScene(Random(12), 0.5f, 0.3f, 0.4f, 30f, 0.003f, ObjectQuality.QUICK.voxelSize)
         val r = Fixtures.run(s, Fixtures.userBox(0.5f, 0.3f, 0.4f, 30f, 0.01f), ObjectQuality.QUICK)
         dump("box30", r)
-        checkBox(r, 0.5f, 0.3f, 0.4f, 0.01f, 0.05)
+        checkBox(r, 0.5f, 0.3f, 0.4f, 0.006f, 0.05)
         // box yawed 15 deg off the object: the oriented rectangle still finds 0.5 x 0.3
         val r2 = Fixtures.run(s, Fixtures.userBox(0.5f, 0.3f, 0.4f, 15f, 0.06f), ObjectQuality.QUICK)
         assertEquals(0.5f, r2.m!!.footprint.length, 0.012f)
@@ -76,8 +76,9 @@ class ObjectScanTest {
         val r = Fixtures.run(s, Fixtures.userBox(0.2f, 0.2f, 0.2f, 20f, 0.01f), q)
         dump("cube200 $q", r)
         val m = r.m!!
-        assertEquals(0.2f, m.footprint.length, 0.008f)
-        assertEquals(0.2f, m.footprint.width, 0.008f)
+        val tol = if (q == ObjectQuality.FINE) 0.0025f else 0.004f   // measured +0.9 mm FINE, +2.2 mm QUICK per length (FootprintAccuracyTest)
+        assertEquals(0.2f, m.footprint.length, tol)
+        assertEquals(0.2f, m.footprint.width, tol)
         assertEquals(0.2f, m.maxHeight, 0.008f)
         assertEquals(0.008, m.hullVolume.toDouble(), 0.008 * 0.08)
         assertEquals(0.008, r.mesh!!.volume(), 0.008 * 0.12)
@@ -104,7 +105,7 @@ class ObjectScanTest {
         dump("cyl10", r)
         val v = PI * 0.1 * 0.1 * 0.2
         assertEquals(v, r.m!!.hullVolume.toDouble(), v * 0.10)
-        assertEquals(0.2f, r.m.footprint.length, 0.01f)
+        assertEquals(0.2f, r.m.footprint.length, 0.0025f)
         assertEquals(0.2f, r.m.maxHeight, 0.008f)
     }
 

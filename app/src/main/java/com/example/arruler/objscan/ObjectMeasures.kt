@@ -61,14 +61,26 @@ data class ObjectMeasurements(
  *  - bounding boxes only bound.
  */
 object ObjectMeasures {
+    /** Default footprint floor gate (m): 1.5 x the 12 mm denoise ball, the height to which the base fillet reaches. */
+    const val FLOOR_GATE = 0.018f
+
 
     /**
      * [trim]: fraction of footprint points ignored at each end when the oriented rectangle's sides are placed (default 0.25 %).
      * The min-area rectangle gives the ORIENTATION; its sides are then re-placed at the [trim] / (1 - [trim]) quantiles of the
      * points projected on its axes. A flat face holds far more than 0.25 % of the points, so a face's quantile IS the face,
      * while the thin Gaussian tails at corners (which the local-plane denoise cannot flatten, ~4 mm at 4 mm noise) are cut.
+     *
+     * [floorGate] (m): the footprint rectangle ignores points lower than this above the support plane (capped at a quarter
+     * of the object height). Table points just above the support margin survive next to the object's walls (the denoise
+     * mixes wall and floor neighbours and lifts them), form a 3-5 mm skirt and fatten each footprint side by that much
+     * (measured: a 200 mm cube at 4 mm noise read +3.3 mm per side with floor adjacent, +1.1 mm without). Default 3.5 voxels
+     * (about twice the support margin). Cost: an object that widens toward the base reads its width at the gate height.
      */
-    fun measure(points: FloatArray, box: ObjectBox, plane: SupportPlane, voxelSize: Float, trim: Float = 0.0025f): ObjectMeasurements? {
+    fun measure(
+        points: FloatArray, box: ObjectBox, plane: SupportPlane, voxelSize: Float, trim: Float = 0.0025f,
+        floorGate: Float = FLOOR_GATE
+    ): ObjectMeasurements? {
         val n = points.size / 3
         if (n < 4) return null
         val lx = FloatArray(n); val lz = FloatArray(n); val hy = FloatArray(n)
@@ -84,8 +96,21 @@ object ObjectMeasures {
         }
         val extentW = x1 - x0; val extentD = z1 - z0
 
-        val fp = ConvexHull.of(List(n) { Vec2(lx[it], lz[it]) })
-        val rect = refineRect(minAreaRect(fp), lx, lz, n, trim)
+        // Footprint rectangle from the points above the floor-fuzz band only (see [floorGate]); the volumes use all points.
+        val gate = minOf(floorGate, 0.25f * hMax)
+        var ng = 0
+        for (i in 0 until n) if (hy[i] >= gate) ng++
+        val useGate = gate > 0f && ng >= 50
+        val gx: FloatArray; val gz: FloatArray
+        if (useGate) {
+            gx = FloatArray(ng); gz = FloatArray(ng)
+            var w = 0
+            for (i in 0 until n) if (hy[i] >= gate) { gx[w] = lx[i]; gz[w] = lz[i]; w++ }
+        } else { gx = lx; gz = lz }
+        val fpAll = ConvexHull.of(List(n) { Vec2(lx[it], lz[it]) })
+        val fpGate = if (useGate) ConvexHull.of(List(ng) { Vec2(gx[it], gz[it]) }) else fpAll
+        val rect = refineRect(minAreaRect(fpGate), gx, gz, gx.size, trim)
+        val fp = fpAll
 
         // convex hull in (x, height, z)
         val hp = ArrayList<Double>(n * 3 + fp.size * 3)
@@ -95,7 +120,8 @@ object ObjectMeasures {
             val o = (n + j) * 3
             pts[o] = v.x.toDouble(); pts[o + 1] = 0.0; pts[o + 2] = v.y.toDouble()
         }
-        val hull = ConvexHull3D.volume(pts, n + fp.size).toFloat()
+        val hullRaw = ConvexHull3D.volume(pts, n + fp.size)
+        val hull = if (hullRaw.isNaN()) rect.area * hMax else hullRaw.toFloat()   // no closed hull: oriented-box bound
 
         // height-field occupancy
         val nx = ceil(extentW / voxelSize).toInt() + 1
@@ -201,20 +227,68 @@ internal object ConvexHull3D {
         }
     }
 
+    /** Number of attempts the last [volume] call needed (1 = clean first build); for tests. */
+    internal var lastAttempts = 0
+
+    /**
+     * Hull volume. Nearly coplanar points (denoised faces, floats widened to double) can make the incremental build
+     * non-manifold: the face count explodes and the signed volume is several times too large (seen once in 20 seeds,
+     * +845 %). The result is therefore verified (every directed edge shared by exactly one reversed partner) and, if it
+     * fails, rebuilt from points jittered by 1e-6, 1e-5 and 1e-4 of the extent (sub-micron to 40 micron on 0.4 m, far below
+     * the 1 mm tolerance of the measurement). Returns NaN if no attempt gives a closed hull.
+     */
     fun volume(p: DoubleArray, n: Int): Double {
-        val faces = build(p, n) ?: return 0.0
-        val (fs, ix, iy, iz) = faces
+        lastAttempts = 0
+        var scale = 0.0
+        if (n >= 4) {
+            for (a in 0..2) {
+                var lo = Double.MAX_VALUE; var hi = -Double.MAX_VALUE
+                for (i in 0 until n) { lo = minOf(lo, p[i * 3 + a]); hi = maxOf(hi, p[i * 3 + a]) }
+                scale = maxOf(scale, hi - lo)
+            }
+        }
+        for (attempt in 0..3) {
+            lastAttempts = attempt + 1
+            val q = if (attempt == 0) p else {
+                val rng = java.util.Random(12345L + attempt)
+                val amp = scale * Math.pow(10.0, attempt - 7.0)
+                DoubleArray(n * 3) { p[it] + (rng.nextDouble() - 0.5) * 2 * amp }
+            }
+            val r = build(q, n) ?: return 0.0
+            if (!r.closed) continue
+            return signedVolume(q, r)
+        }
+        return Double.NaN
+    }
+
+    private fun signedVolume(p: DoubleArray, r: Result): Double {
         var vol = 0.0
-        for (f in fs) {
-            val ax = p[f.a * 3] - ix; val ay = p[f.a * 3 + 1] - iy; val az = p[f.a * 3 + 2] - iz
-            val bx = p[f.b * 3] - ix; val by = p[f.b * 3 + 1] - iy; val bz = p[f.b * 3 + 2] - iz
-            val cx = p[f.c * 3] - ix; val cy = p[f.c * 3 + 1] - iy; val cz = p[f.c * 3 + 2] - iz
+        for (f in r.faces) {
+            val ax = p[f.a * 3] - r.ix; val ay = p[f.a * 3 + 1] - r.iy; val az = p[f.a * 3 + 2] - r.iz
+            val bx = p[f.b * 3] - r.ix; val by = p[f.b * 3 + 1] - r.iy; val bz = p[f.b * 3 + 2] - r.iz
+            val cx = p[f.c * 3] - r.ix; val cy = p[f.c * 3 + 1] - r.iy; val cz = p[f.c * 3 + 2] - r.iz
             vol += ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx)
         }
         return abs(vol) / 6.0
     }
 
-    private data class Result(val faces: List<Face>, val ix: Double, val iy: Double, val iz: Double)
+    private fun isClosed(fs: List<Face>, n: Int): Boolean {
+        val es = HashMap<Long, Int>(fs.size * 4)
+        for (f in fs) for (e in 0..2) {
+            val a = if (e == 0) f.a else if (e == 1) f.b else f.c
+            val b = if (e == 0) f.b else if (e == 1) f.c else f.a
+            es.merge(a.toLong() * n + b, 1, Int::plus)
+        }
+        for ((k, c) in es) {
+            if (c != 1) return false
+            val a = (k / n).toInt(); val b = (k % n).toInt()
+            if (es[b.toLong() * n + a] != 1) return false
+        }
+        return true
+    }
+
+    private class Result(val faces: List<Face>, val ix: Double, val iy: Double, val iz: Double, val closed: Boolean)
+
 
     private fun build(p: DoubleArray, n: Int): Result? {
         if (n < 4) return null
@@ -313,6 +387,6 @@ internal object ConvexHull3D {
             alive.removeAll { !it.alive }
             alive.addAll(fresh)
         }
-        return Result(alive, ix, iy, iz)
+        return Result(alive, ix, iy, iz, guard < 200_000 && isClosed(alive, n))
     }
 }
