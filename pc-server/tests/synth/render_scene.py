@@ -65,11 +65,93 @@ def make_texture(rng: np.random.Generator, size: int, min_cells: int = 4, max_ce
     return np.asarray(img)
 
 
-class Box:
-    """Axis-aligned textured box; faces are keyed (axis, sign) with sign 0 = low face, 1 = high face."""
+def _yaw_rot(yaw_rad: float) -> np.ndarray:
+    """Right-handed rotation about +Y (same convention as armeasure_pc.processing.objmesh.yaw_matrix)."""
+    c, s = math.cos(yaw_rad), math.sin(yaw_rad)
+    return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
 
-    def __init__(self, lo, hi, tex: dict):
-        self.lo, self.hi, self.tex = np.asarray(lo, np.float64), np.asarray(hi, np.float64), tex
+
+class Box:
+    """Textured box, axis-aligned in its own frame; faces are keyed (axis, sign) with sign 0 = low face, 1 = high face.
+    `yaw` (rad) turns the whole box about the world +Y axis through the origin (a turntable): world = Ry(yaw) @ local."""
+
+    def __init__(self, lo, hi, tex: dict, yaw: float = 0.0):
+        self.lo, self.hi, self.tex, self.yaw = np.asarray(lo, np.float64), np.asarray(hi, np.float64), tex, yaw
+
+    def intersect(self, o: np.ndarray, d: np.ndarray, best_t: np.ndarray):
+        """Nearest hits closer than best_t: returns (indices, t, colours) or None."""
+        if self.yaw:
+            r = _yaw_rot(self.yaw)
+            o, d = o @ r, d @ r                          # world -> local (row vectors: v @ R = R^T v)
+        n = len(d)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            inv = 1.0 / d
+        t1, t2 = (self.lo - o) * inv, (self.hi - o) * inv
+        tmin, tmax = np.minimum(t1, t2), np.maximum(t1, t2)
+        tmin = np.where(np.isnan(tmin), -np.inf, tmin)
+        tmax = np.where(np.isnan(tmax), np.inf, tmax)
+        ax = np.argmax(tmin, 1)
+        tn = tmin[np.arange(n), ax]
+        tf = tmax.min(1)
+        hit = (tn <= tf) & (tf > 0) & (tn > 1e-6) & (tn < best_t)
+        if not hit.any():
+            return None
+        idx = np.flatnonzero(hit)
+        p = o + d[idx] * tn[idx, None]
+        a = ax[idx]
+        sg = (d[idx, a] < 0).astype(int)                 # ray going -axis hits the HIGH face
+        col = np.empty((len(idx), 3), np.float32)
+        for axis in range(3):
+            for sign in (0, 1):
+                m = (a == axis) & (sg == sign)
+                if not m.any():
+                    continue
+                o1, o2 = [k for k in range(3) if k != axis]
+                pp = p[m]
+                uu = (pp[:, o1] - self.lo[o1]) / (self.hi[o1] - self.lo[o1])
+                vv = (pp[:, o2] - self.lo[o2]) / (self.hi[o2] - self.lo[o2])
+                col[m] = _lookup(self.tex[(axis, sign)], uu, vv)
+        return idx, tn[idx], col
+
+
+class Disc:
+    """Textured turntable: vertical cylinder (axis = world Y), radius `r`, from y0 to y1; the top cap carries `tex`,
+    the side is plain grey. `yaw` turns it about +Y like Box."""
+
+    def __init__(self, r: float, y0: float, y1: float, tex: np.ndarray, yaw: float = 0.0):
+        self.r, self.y0, self.y1, self.tex, self.yaw = r, y0, y1, tex, yaw
+
+    def intersect(self, o: np.ndarray, d: np.ndarray, best_t: np.ndarray):
+        if self.yaw:
+            rot = _yaw_rot(self.yaw)
+            o, d = o @ rot, d @ rot
+        n = len(d)
+        t = np.full(n, np.inf)
+        cap = np.zeros(n, bool)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            tc = (self.y1 - o[1]) / d[:, 1]
+            px, pz = o[0] + d[:, 0] * tc, o[2] + d[:, 2] * tc
+            okc = (tc > 1e-6) & (d[:, 1] < 0) & (px * px + pz * pz <= self.r ** 2)
+            t[okc], cap[okc] = tc[okc], True
+            a = d[:, 0] ** 2 + d[:, 2] ** 2
+            b = 2 * (o[0] * d[:, 0] + o[2] * d[:, 2])
+            c = o[0] ** 2 + o[2] ** 2 - self.r ** 2
+            disc = b * b - 4 * a * c
+            sq = np.sqrt(np.where(disc >= 0, disc, np.nan))
+            for ts in ((-b - sq) / (2 * a), (-b + sq) / (2 * a)):
+                y = o[1] + d[:, 1] * ts
+                oks = (ts > 1e-6) & (y >= self.y0) & (y <= self.y1) & (ts < t)
+                t[oks], cap[oks] = ts[oks], False
+        hit = np.isfinite(t) & (t < best_t)
+        if not hit.any():
+            return None
+        idx = np.flatnonzero(hit)
+        col = np.full((len(idx), 3), 110.0, np.float32)
+        ci = cap[idx]
+        if ci.any():
+            p = o + d[idx[ci]] * t[idx[ci], None]
+            col[ci] = _lookup(self.tex, (p[:, 0] / self.r + 1) / 2, (p[:, 2] / self.r + 1) / 2)
+        return idx, t[idx], col
 
 
 def _lookup(tex: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
@@ -104,34 +186,13 @@ def render(boxes: list[Box], fx: float, fy: float, cx: float, cy: float, W: int,
             best_t = np.full(n, np.inf)
             col = np.empty((n, 3), np.float32)
             col[:] = bg
-            with np.errstate(divide="ignore", invalid="ignore"):
-                inv = 1.0 / d
             for bx in boxes:
-                t1, t2 = (bx.lo - o) * inv, (bx.hi - o) * inv
-                tmin, tmax = np.minimum(t1, t2), np.maximum(t1, t2)
-                tmin = np.where(np.isnan(tmin), -np.inf, tmin)
-                tmax = np.where(np.isnan(tmax), np.inf, tmax)
-                ax = np.argmax(tmin, 1)
-                tn = tmin[np.arange(n), ax]
-                tf = tmax.min(1)
-                hit = (tn <= tf) & (tf > 0) & (tn > 1e-6) & (tn < best_t)
-                if not hit.any():
+                h = bx.intersect(o, d, best_t)
+                if h is None:
                     continue
-                idx = np.flatnonzero(hit)
-                best_t[idx] = tn[idx]
-                p = o + d[idx] * tn[idx, None]
-                a = ax[idx]
-                sg = (d[idx, a] < 0).astype(int)       # ray going -axis hits the HIGH face
-                for axis in range(3):
-                    for sign in (0, 1):
-                        m = (a == axis) & (sg == sign)
-                        if not m.any():
-                            continue
-                        o1, o2 = [k for k in range(3) if k != axis]
-                        pp = p[m]
-                        uu = (pp[:, o1] - bx.lo[o1]) / (bx.hi[o1] - bx.lo[o1])
-                        vv = (pp[:, o2] - bx.lo[o2]) / (bx.hi[o2] - bx.lo[o2])
-                        col[idx[m]] = _lookup(bx.tex[(axis, sign)], uu, vv)
+                idx, tt, cc = h
+                best_t[idx] = tt
+                col[idx] = cc
             out[s:s + chunk] += col
     out /= len(offs)
     if noise > 0:
@@ -359,10 +420,269 @@ def build_drone_job(out_dir: Path, gps_noise_m: float = 0.0, fast: bool = False,
     return {"zip": zpath, "folder": img_dir, **truth}
 
 
+# ----------------------------------------------------------------------------------------------- spin / hybrid job
+# Render frame: Y up, turntable axis = the Y axis through the origin, disc top = the support plane y = 0. The phone
+# camera is STATIC (0.40 m from the axis); the cube + disc turn by theta about the axis while the ground stays put, so
+# the static ground is in every image (that is why the job carries object masks).  ARCore frame = render frame moved by
+# a yaw of 37 degrees and a shift (so nothing in the job is axis-aligned at the origin).
+SPIN_DIST_M = 0.40
+SPIN_ELEV_DEG = (15.0, 40.0)             # camera elevation above the horizontal as seen from the cube centre
+SPIN_N, SPIN_STEP_DEG = 36, 10.0         # frames per turn, degrees between frames
+DISC_R, DISC_T = 0.22, 0.02
+G_YAW_DEG = 37.0
+G_SHIFT = np.array([0.35, 0.85, -0.60])
+
+
+def g_matrix() -> np.ndarray:
+    M = np.eye(4)
+    M[:3, :3] = _yaw_rot(math.radians(G_YAW_DEG))
+    M[:3, 3] = G_SHIFT
+    return M
+
+
+def spin_textures(seed: int = 7):
+    rng = np.random.default_rng(seed)
+    cube = {(a, s): make_texture(rng, 1024, min_cells=4, max_cells=256) for a in range(3) for s in range(2)}
+    disc = make_texture(rng, 1024, min_cells=4, max_cells=256, n_markers=60, n_text=40)
+    ground = make_texture(rng, 2048, min_cells=4, max_cells=512, n_markers=120, n_text=60)
+    return cube, disc, ground
+
+
+def spin_boxes(tex, theta_rad: float) -> list:
+    cube, disc, ground = tex
+    small = ground[:64, :64].copy()
+    gt = {(1, 1): ground, (1, 0): small, (0, 0): small, (0, 1): small, (2, 0): small, (2, 1): small}
+    h = CUBE_SIDE / 2
+    return [Box([-h, 0, -h], [h, CUBE_SIDE, h], cube, yaw=theta_rad),
+            Disc(DISC_R, -DISC_T, 0.0, disc, yaw=theta_rad),
+            Box([-1.5, -0.05, -1.5], [1.5, -DISC_T, 1.5], gt)]
+
+
+def spin_views(turn_offsets_deg=(0.0, 5.0)) -> list[dict]:
+    """72 spin views: two turns of 36 frames, static camera per turn at 15 and 40 degrees elevation."""
+    target = np.array([0.0, CUBE_SIDE / 2, 0.0])
+    views = []
+    for ti, (el, off) in enumerate(zip(SPIN_ELEV_DEG, turn_offsets_deg)):
+        eye = np.array([SPIN_DIST_M, CUBE_SIDE / 2 + SPIN_DIST_M * math.tan(math.radians(el)), 0.0])
+        c2w = lookat_c2w(eye, target, (0, 1, 0))
+        for k in range(SPIN_N):
+            views.append({"c2w": c2w, "fx": 1000.0, "fy": 1000.0, "cx": 640.0, "cy": 480.0, "w": 1280, "h": 960,
+                          "theta": math.radians(off + k * SPIN_STEP_DEG), "turn": ti})
+    return views
+
+
+def walk_views(n_ring: int = 12, radius: float = 0.5, elev_deg=(25.0, 50.0)) -> list[dict]:
+    """24 walk-around views of the (not turning) object: two rings, 30 degrees apart in azimuth."""
+    target = np.array([0.0, CUBE_SIDE / 2, 0.0])
+    views = []
+    for ri, el in enumerate(elev_deg):
+        for k in range(n_ring):
+            az = 2 * math.pi * (k + 0.5 * ri) / n_ring
+            eye = target + radius * np.array([math.cos(az) * math.cos(math.radians(el)), math.sin(math.radians(el)),
+                                              math.sin(az) * math.cos(math.radians(el))])
+            views.append({"c2w": lookat_c2w(eye, target, (0, 1, 0)), "fx": 1000.0, "fy": 1000.0, "cx": 640.0,
+                          "cy": 480.0, "w": 1280, "h": 960, "theta": 0.0, "turn": -1})
+    return views
+
+
+def _convex_hull(pts: np.ndarray) -> np.ndarray:
+    p = sorted(map(tuple, pts))
+    if len(p) < 3:
+        return np.array(p)
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    h = []
+    for q in p:
+        while len(h) >= 2 and cross(h[-2], h[-1], q) <= 0:
+            h.pop()
+        h.append(q)
+    lower = len(h) + 1
+    for q in reversed(p[:-1]):
+        while len(h) >= lower and cross(h[-2], h[-1], q) <= 0:
+            h.pop()
+        h.append(q)
+    return np.array(h[:-1])
+
+
+def box_mask_png(box: dict, pose_c2w: np.ndarray, v: dict, pad: float = 0.02) -> np.ndarray:
+    """Python port of the phone's BoxMask: the 8 corners of the box (base-centred, grown by `pad`) projected with the
+    keyframe pose, convex hull rasterised at pixel centres; 255 inside, 0 outside. `box` is the manifest box
+    (volume centre, size [w, h, d], yaw_deg)."""
+    cx, cy, cz = box["center"]
+    w, h, d = box["size"]
+    base_y = cy - h / 2
+    yaw = math.radians(box.get("yaw_deg", 0.0))
+    c, s = math.cos(yaw), math.sin(yaw)
+    corners = []
+    for i in range(8):
+        lx = w / 2 + pad if i & 1 else -w / 2 - pad
+        ly = h + pad if i & 2 else -pad
+        lz = d / 2 + pad if i & 4 else -d / 2 - pad
+        corners.append([cx + lx * c + lz * s, base_y + ly, cz - lx * s + lz * c])
+    inv = np.linalg.inv(pose_c2w)
+    pts = []
+    for X in corners:
+        xc = inv @ np.append(X, 1.0)
+        depth = -xc[2]
+        if depth > 0.02:
+            pts.append([v["fx"] * xc[0] / depth + v["cx"], v["cy"] - v["fy"] * xc[1] / depth])
+    hull = _convex_hull(np.array(pts))
+    m = np.zeros((v["h"], v["w"]), np.uint8)
+    if len(hull) < 3:
+        return m
+    x0, x1 = max(0, int(np.floor(hull[:, 0].min()))), min(v["w"] - 1, int(np.ceil(hull[:, 0].max())))
+    y0, y1 = max(0, int(np.floor(hull[:, 1].min()))), min(v["h"] - 1, int(np.ceil(hull[:, 1].max())))
+    xs, ys = np.meshgrid(np.arange(x0, x1 + 1) + 0.5, np.arange(y0, y1 + 1) + 0.5)
+    inside = np.ones(xs.shape, bool)
+    for i in range(len(hull)):
+        a, b = hull[i], hull[(i + 1) % len(hull)]
+        inside &= (b[0] - a[0]) * (ys - a[1]) - (b[1] - a[1]) * (xs - a[0]) >= 0
+    m[y0:y1 + 1, x0:x1 + 1] = inside.astype(np.uint8) * 255
+    return m
+
+
+def _render_spin_one(args):
+    i, view, ss = args
+    if "tex" not in _SCENE:
+        _SCENE["tex"] = spin_textures()
+    img = render(spin_boxes(_SCENE["tex"], view["theta"]), view["fx"], view["fy"], view["cx"], view["cy"], view["w"],
+                 view["h"], view["c2w"], ss=ss, seed=1000 + i)
+    return i, img
+
+
+def _jpeg(im: np.ndarray) -> bytes:
+    import io
+    b = io.BytesIO()
+    Image.fromarray(im).save(b, "JPEG", quality=92)
+    return b.getvalue()
+
+
+def _poses_json(views: list[dict], rng, noise_m: float, noise_deg: float, first: int = 1, prefix="images/") -> dict:
+    """poses.json in the ARCore frame; static spin cameras carry small tracking noise (position, rotation)."""
+    G = g_matrix()
+    items = []
+    last = {}
+    for i, v in enumerate(views, first):
+        M = G @ v["c2w"]
+        if noise_m > 0:
+            key = v["turn"]
+            if key not in last or rng.random() < 0.3:                  # tracking noise changes slowly
+                ax = rng.normal(size=3)
+                ax /= np.linalg.norm(ax)
+                a = math.radians(rng.normal(0, noise_deg))
+                K = np.array([[0, -ax[2], ax[1]], [ax[2], 0, -ax[0]], [-ax[1], ax[0], 0]])
+                last[key] = (rng.normal(0, noise_m, 3), np.eye(3) + math.sin(a) * K + (1 - math.cos(a)) * K @ K)
+            dt, dR = last[key]
+            M = M.copy()
+            M[:3, :3] = dR @ M[:3, :3]
+            M[:3, 3] = M[:3, 3] + dt
+        items.append({"file": f"{prefix}{i:06d}.jpg", "timestamp_ns": 1_000_000_000 * i,
+                      "pose": [float(x) for x in M.flatten(order="F")], "fx": v["fx"], "fy": v["fy"],
+                      "cx": v["cx"], "cy": v["cy"], "width": v["w"], "height": v["h"]})
+    return {"schema": 1, "images": items}
+
+
+def build_spin_job(out_dir: Path, fast: bool = False, seed: int = 11) -> dict:
+    """Writes spin_job.zip (capture=spin: 2 x 36 static-camera frames + masks) and hybrid_job.zip (the same plus
+    cloud.ply and 24 walk-around frames with true poses), plus spin_truth.json."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    spin, walk = spin_views(), walk_views()
+    allv = spin + walk
+    workers = max(1, min(10, (os.cpu_count() or 4) - 2))
+    with ProcessPoolExecutor(workers) as ex:
+        res = dict(ex.map(_render_spin_one, [(i, v, 1 if fast else 2) for i, v in enumerate(allv)]))
+    imgs = [res[i] for i in range(len(allv))]
+    rng = np.random.default_rng(seed)
+    G = g_matrix()
+    spin_poses = _poses_json(spin, rng, noise_m=0.002, noise_deg=0.1)
+    walk_poses = _poses_json(walk, rng, noise_m=0.0, noise_deg=0.0)
+    box = {"center": [float(x) for x in G[:3, 3] + [0, CUBE_SIDE / 2, 0]], "size": [CUBE_SIDE] * 3,
+           "yaw_deg": G_YAW_DEG}
+    plane = {"normal": [0.0, 1.0, 0.0], "d": float(-G_SHIFT[1])}
+    centres = np.array([np.array(_pose_m(it["pose"]))[:3, 3] for it in spin_poses["images"]])
+    mean_c = centres.mean(axis=0)
+    base = G[:3, 3]
+    manifest = {"schema": 1, "job_type": "photogrammetry", "units": "meters", "quality": "FINE",
+                "image_count": len(spin), "coordinates": {"frame": "ARCore world", "units": "meters", "up": "+Y"},
+                "capture": "spin", "camera_static": True, "box": box, "support_plane": plane,
+                "rotation_axis": {"point": [float(x) for x in base], "direction": [0.0, 1.0, 0.0]},
+                "camera_to_axis_m": float(math.hypot(mean_c[0] - base[0], mean_c[2] - base[2])),
+                "camera_height_above_plane_m": float(mean_c[1] - G_SHIFT[1]),
+                "masks_dir": "masks/", "mask_padding_m": 0.02,
+                "files": [f"images/{i:06d}.jpg" for i in range(1, len(spin) + 1)]}
+    # cloud.ply of the (static) object + support: noisy samples of the surface, ARCore frame
+    from armeasure_pc.processing.common import write_ply_points
+    crng = np.random.default_rng(seed + 1)
+    h = CUBE_SIDE / 2
+    pts = []
+    for axis, val in ((0, -h), (0, h), (2, -h), (2, h)):
+        o = [k for k in range(3) if k != axis]
+        p = np.zeros((1200, 3))
+        p[:, axis] = val
+        p[:, o[0]] = crng.uniform(-h, h, 1200) if o[0] != 1 else crng.uniform(0, CUBE_SIDE, 1200)
+        p[:, o[1]] = crng.uniform(-h, h, 1200) if o[1] != 1 else crng.uniform(0, CUBE_SIDE, 1200)
+        pts.append(p)
+    pts.append(np.column_stack([crng.uniform(-h, h, 1200), np.full(1200, CUBE_SIDE), crng.uniform(-h, h, 1200)]))
+    gx = crng.uniform(-0.3, 0.3, (3000, 2))
+    pts.append(np.column_stack([gx[:, 0], np.zeros(3000), gx[:, 1]]))
+    P = np.vstack(pts) + crng.normal(0, 0.003, (sum(len(q) for q in pts), 3))
+    P = P @ G[:3, :3].T + G[:3, 3]
+    with tempfile_dir() as td:
+        write_ply_points(td / "cloud.ply", P)
+        cloud_bytes = (td / "cloud.ply").read_bytes()
+    paths = {}
+    for kind in ("spin", "hybrid"):
+        zpath = out_dir / f"{kind}_job.zip"
+        paths[kind] = zpath
+        man = dict(manifest, capture=kind)
+        with zipfile.ZipFile(zpath, "w", zipfile.ZIP_STORED) as z:
+            if kind == "hybrid":
+                man["walk"] = {"dir": "walk/", "poses": "walk/poses.json", "images_dir": "walk/images/",
+                               "image_count": len(walk)}
+                man["files"] = man["files"] + ["cloud.ply"]
+            z.writestr("manifest.json", json.dumps(man))
+            z.writestr("poses.json", json.dumps(spin_poses))
+            for i, (v, it) in enumerate(zip(spin, spin_poses["images"]), 1):
+                z.writestr(it["file"], _jpeg(imgs[i - 1]))
+                m = box_mask_png(box, _pose_m(it["pose"]), v)
+                import io
+                b = io.BytesIO()
+                Image.fromarray(m, "L").save(b, "PNG")
+                z.writestr(f"masks/{Path(it['file']).name}.png", b.getvalue())
+            if kind == "hybrid":
+                z.writestr("cloud.ply", cloud_bytes)
+                z.writestr("walk/poses.json", json.dumps(walk_poses))      # file names relative to walk/ (as the phone)
+                for i, it in enumerate(walk_poses["images"], 1):
+                    z.writestr("walk/" + it["file"], _jpeg(imgs[len(spin) + i - 1]))
+    truth = {"cube_side_m": CUBE_SIDE, "cube_volume_m3": CUBE_SIDE ** 3, "n_spin": len(spin), "n_walk": len(walk),
+             "camera_dist_m": SPIN_DIST_M, "elev_deg": list(SPIN_ELEV_DEG), "step_deg": SPIN_STEP_DEG,
+             "g_yaw_deg": G_YAW_DEG, "g_shift": G_SHIFT.tolist(), "box": box, "support_plane": plane,
+             "camera_to_axis_m": manifest["camera_to_axis_m"],
+             "camera_height_above_plane_m": manifest["camera_height_above_plane_m"]}
+    (out_dir / "spin_truth.json").write_text(json.dumps(truth))
+    return {"zips": paths, **truth}
+
+
+def _pose_m(p16) -> np.ndarray:
+    return np.asarray(p16, float).reshape(4, 4, order="F")
+
+
+class tempfile_dir:
+    def __enter__(self):
+        import tempfile
+        self._d = tempfile.TemporaryDirectory()
+        return Path(self._d.name)
+
+    def __exit__(self, *a):
+        self._d.cleanup()
+
+
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     ap = argparse.ArgumentParser()
-    ap.add_argument("kind", choices=["phone", "drone"])
+    ap.add_argument("kind", choices=["phone", "drone", "spin"])
     ap.add_argument("out")
     ap.add_argument("--jitter", action="store_true")
     ap.add_argument("--gps-noise", type=float, default=0.0)
@@ -370,6 +690,10 @@ if __name__ == "__main__":
     a = ap.parse_args()
     import time
     t = time.time()
-    r = build_phone_job(Path(a.out), a.jitter, a.fast) if a.kind == "phone" else \
-        build_drone_job(Path(a.out), a.gps_noise, a.fast)
-    print("wrote", r["zip"], f"{time.time() - t:.1f} s")
+    if a.kind == "spin":
+        r = build_spin_job(Path(a.out), a.fast)
+        print("wrote", *r["zips"].values(), f"{time.time() - t:.1f} s")
+    else:
+        r = build_phone_job(Path(a.out), a.jitter, a.fast) if a.kind == "phone" else \
+            build_drone_job(Path(a.out), a.gps_noise, a.fast)
+        print("wrote", r["zip"], f"{time.time() - t:.1f} s")

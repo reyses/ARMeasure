@@ -156,3 +156,83 @@ def test_drone_house_e2e_noisy_gps(tmp_path):
     assert 0.1 < m["alignment_rmse_m"] < 2.0                  # the GPS noise itself, not a model error
     assert abs(geo["scale_error_pct"]) < 2.0                  # 'relative accuracy 1-3 %' claim of the README
     assert geo["ground_plane_tilt_deg"] < 1.0
+
+
+# ----------------------------------------------------------------------------------------------- spin / hybrid
+# Scene (render_scene.build_spin_job): 200 mm textured cube on a textured 0.44 m turntable disc, static textured ground,
+# phone fixed 0.40 m from the axis, two turns of 36 frames (10 degree steps) at 15 and 40 degrees camera elevation, the
+# cube + disc turn and the ground does not; masks = the phone's padded box hull. Hybrid: + 24 walk-around frames with
+# true poses (2 rings, 0.5 m) + a noisy depth cloud. Spin sides must be within +-3 mm, volume +-4 %; hybrid sides +-2.5 mm.
+def _spin_data():
+    import render_scene
+    if not (DATA / "spin_job.zip").exists() or not (DATA / "hybrid_job.zip").exists():
+        render_scene.build_spin_job(DATA)
+    return json.loads((DATA / "spin_truth.json").read_text())
+
+
+def _dims_mm(m: dict) -> list:
+    return [round(m["object_dims"][k] * 1000, 2) for k in ("length_m", "width_m", "height_m")]
+
+
+@pytest.mark.gpu_e2e
+@e2e
+def test_spin_cube_e2e(tmp_path):
+    truth = _spin_data()
+    run = run_job(DATA / "spin_job.zip", "PHOTOGRAMMETRY", tmp_path)
+    res = run["result"]
+    m = res["measures"]
+    dims = _dims_mm(m)
+    vol = m["volume_m3"]["recommended"]
+    st = res["stats"]
+    report = {"capture": "spin", "dims_mm": dims, "side_errors_mm": [round(d - 200.0, 2) for d in dims],
+              "volume_m3": vol, "volume_error_pct": round((vol / 0.008 - 1) * 100, 3), "stats": st,
+              "stages_s": {k: round(v, 1) for k, v in run["stages_s"].items()}, "wall_s": round(run["wall_s"], 1)}
+    (DATA / "report_spin.json").write_text(json.dumps(report, indent=1))
+    print(json.dumps(report, indent=1))
+    for d in dims:
+        assert abs(d - 200.0) <= 3.0, dims
+    assert abs(vol / 0.008 - 1) <= 0.04, vol
+    assert st["capture"] == "spin" and st["sparse"]["registered_images"] == 72 and st["images"] == 72
+    assert st["scale"]["axis_fit"]["axis_vs_phone_gravity_deg"] < 1.0
+    assert abs(st["scale"]["scale_check_from_camera_height"]["ratio_to_scale"] - 1) < 0.03
+    assert set(res["files"]) == {"mesh.obj", "texture.png"}
+
+
+@pytest.mark.gpu_e2e
+@e2e
+def test_hybrid_cube_e2e(tmp_path):
+    import accuracy
+    truth = _spin_data()
+    run = run_job(DATA / "hybrid_job.zip", "PHOTOGRAMMETRY", tmp_path)
+    res = run["result"]
+    m = res["measures"]
+    st = res["stats"]
+    walk, fused = m["walk_only"], m["fused"]
+    for k in ("object_dims", "volume_m3"):
+        assert k in walk and k in fused and set(fused["volume_m3"]) == {"low", "high", "recommended"}
+    dw, df = _dims_mm(walk), _dims_mm(fused)
+    # fused mesh vs truth: the mesh is in the ARCore frame (box yaw 37 deg + shift); bring it to the render frame
+    import open3d as o3d
+    P = accuracy.sample_mesh(run["dir"] / "mesh.obj")
+    yaw = np.radians(truth["g_yaw_deg"])
+    Ry = np.array([[np.cos(yaw), 0, np.sin(yaw)], [0, 1, 0], [-np.sin(yaw), 0, np.cos(yaw)]])
+    geo = accuracy._phone_geometry((P - np.array(truth["g_shift"])) @ Ry)
+    report = {"capture": "hybrid", "walk_only_dims_mm": dw, "fused_dims_mm": df,
+              "walk_only_side_errors_mm": [round(d - 200.0, 2) for d in dw],
+              "fused_side_errors_mm": [round(d - 200.0, 2) for d in df],
+              "walk_only_volume_m3": walk["volume_m3"]["recommended"], "fused_volume_m3": fused["volume_m3"]["recommended"],
+              "fused_volume_error_pct": round((fused["volume_m3"]["recommended"] / 0.008 - 1) * 100, 3),
+              "walk_only_volume_error_pct": round((walk["volume_m3"]["recommended"] / 0.008 - 1) * 100, 3),
+              "fused_mesh_to_truth_cube": geo["mesh_to_truth_cube_only"], "registration": st["registration"],
+              "stats": st, "stages_s": {k: round(v, 1) for k, v in run["stages_s"].items()},
+              "wall_s": round(run["wall_s"], 1)}
+    (DATA / "report_hybrid.json").write_text(json.dumps(report, indent=1))
+    print(json.dumps(report, indent=1))
+    for d in df:
+        assert abs(d - 200.0) <= 2.5, df
+    assert abs(fused["volume_m3"]["recommended"] / 0.008 - 1) <= 0.03
+    assert st["capture"] == "hybrid" and st["fused"] is True
+    assert st["images"] == 96 and st["sparse"]["registered_images"] >= 90 and "mean_reprojection_error_px" in st["sparse"]
+    assert st["registration"]["inliers"] >= 20 and st["registration"]["rmse_mm"] < 3.0
+    assert abs(st["registration"]["scale_ratio_vs_camera_to_axis"] - 1) < 0.03
+    assert m["object_dims"] == fused["object_dims"]                  # headline = fused

@@ -19,7 +19,7 @@ from .common import Ctx, JobError, read_manifest, safe_extract, versions
 from .dronemeta import build_table, has_gps, time_ordered, write_table
 from .geo import (camera_from_meta, convex_hull_area, fit_ground_plane, geodetic_to_enu, gsd_cm_per_px)
 from .photogrammetry import (collect_outputs, detect_tools, missing_tools_message, pick_flag, run_cmd,
-                             openmvs_chain)
+                             openmvs_chain, with_gpu_densify)
 
 # quality -> (max image side px or None for full resolution, DensifyPointCloud --resolution-level)
 QUALITY = {"QUICK": (1600, 2), "FINE": (2400, 1), "DETAILED": (None, 0)}
@@ -200,6 +200,7 @@ def run(upload_zip: Path, outdir: Path, ctx: Ctx) -> dict:
     msg = missing_tools_message(tools)
     if msg:
         raise JobError(msg)
+    tools = with_gpu_densify(tools)
     colmap = tools["colmap"]
 
     ctx.progress(0.01, "collect")

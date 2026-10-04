@@ -22,6 +22,9 @@ from .. import config
 from .common import Cancelled, Ctx, JobError, read_manifest, safe_extract, versions
 from .posec import arcore_to_colmap
 
+# DensifyPointCloud --resolution-level of the photo paths. Level 0 on the GPU is 4x denser but its stray points at the
+# cube edges and base inflate the oriented box by 1.5-3 mm (measured: 203.5 mm height, +3.5 mm), level 1 measures better.
+KNOWN_POSE_LEVEL = 1
 OPENMVS_EXES = ["InterfaceCOLMAP", "DensifyPointCloud", "ReconstructMesh", "RefineMesh", "TextureMesh"]
 PINHOLE = 1  # COLMAP camera model id
 
@@ -33,12 +36,28 @@ def find_tool(name: str) -> Path | None:
         return Path(hit)
     if config.TOOLS_DIR.exists():
         for p in config.TOOLS_DIR.rglob(exe):
-            return p
+            if ALT_MVS_DIR.name not in p.parts:        # the alternative OpenMVS build is only used for densifying
+                return p
     return None
+
+
+ALT_MVS_DIR = config.TOOLS_DIR / "openmvs_alt"
+
+
+def find_gpu_densify() -> Path | None:
+    """OpenMVS 2.3.0 DensifyPointCloud (tools/openmvs_alt/v230): its CUDA kernels carry PTX that runs on the RTX 3060
+    (sm_86); the 2.4.0 release binary only holds sm_89 machine code and fails with 'named symbol not found'."""
+    p = ALT_MVS_DIR / "v230" / "DensifyPointCloud.exe"
+    return p if p.exists() else None
 
 
 def detect_tools() -> dict:
     return {"colmap": find_tool("colmap"), **{n: find_tool(n) for n in OPENMVS_EXES}}
+
+
+def with_gpu_densify(tools: dict) -> dict:
+    g = find_gpu_densify()
+    return {**tools, "DensifyPointCloud_gpu": g} if g else dict(tools)
 
 
 def missing_tools_message(tools: dict) -> str | None:
@@ -170,13 +189,13 @@ def patch_database_cameras(db: Path, poses: list[dict], image_dir: Path) -> dict
     length); when every image has the same intrinsics (to 0.5 px) the caller used a single shared camera.
     """
     from PIL import Image
-    by_name = {Path(p["file"]).name: p for p in poses}
+    by_name = {p.get("name", Path(p["file"]).name): p for p in poses}
     con = sqlite3.connect(str(db))
     try:
         rows = con.execute("SELECT image_id, name, camera_id FROM images").fetchall()
         out = {}
         for image_id, name, cam_id in rows:
-            base = Path(name).name
+            base = name if name in by_name else Path(name).name
             p = by_name.get(base)
             if p is None:
                 raise JobError(f"image {name} has no entry in poses.json")
@@ -194,15 +213,20 @@ def patch_database_cameras(db: Path, poses: list[dict], image_dir: Path) -> dict
     return out
 
 
-def write_text_model(model_dir: Path, db: Path, poses: list[dict]) -> int:
-    """Write cameras.txt / images.txt / points3D.txt (poses = ARCore->COLMAP converted)."""
-    by_name = {Path(p["file"]).name: p for p in poses}
+def write_text_model(model_dir: Path, db: Path, poses: list[dict], only_listed: bool = False,
+                     colmap_poses: bool = False) -> int:
+    """Write cameras.txt / images.txt / points3D.txt. poses = ARCore camera->world (converted), or COLMAP world->camera
+    when colmap_poses (entries carry "q" wxyz and "t"). An entry's "name" (default: its file's base name) is the
+    COLMAP image name; only_listed skips database images without an entry."""
+    by_name = {p.get("name", Path(p["file"]).name): p for p in poses}
     con = sqlite3.connect(str(db))
     try:
         cams = con.execute("SELECT camera_id, model, width, height, params FROM cameras").fetchall()
         imgs = con.execute("SELECT image_id, name, camera_id FROM images ORDER BY image_id").fetchall()
     finally:
         con.close()
+    if only_listed:
+        imgs = [r for r in imgs if r[1] in by_name or Path(r[1]).name in by_name]
     model_dir.mkdir(parents=True, exist_ok=True)
     used_cams = {c for _, _, c in imgs}
     with open(model_dir / "cameras.txt", "w") as f:
@@ -217,7 +241,8 @@ def write_text_model(model_dir: Path, db: Path, poses: list[dict]) -> int:
     with open(model_dir / "images.txt", "w") as f:
         f.write("# IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n")
         for iid, name, cid in imgs:
-            q, t = arcore_to_colmap(by_name[Path(name).name]["pose"])
+            e = by_name[name] if name in by_name else by_name[Path(name).name]
+            q, t = (e["q"], e["t"]) if colmap_poses else arcore_to_colmap(e["pose"])
             q, t = [float(x) for x in q], [float(x) for x in t]
             f.write(f"{iid} {q[0]!r} {q[1]!r} {q[2]!r} {q[3]!r} {t[0]!r} {t[1]!r} {t[2]!r} {cid} {name}\n\n")
     (model_dir / "points3D.txt").write_text("# empty\n")
@@ -247,8 +272,12 @@ def openmvs_chain(tools: dict, dense: Path, level: int, ctx: Ctx, log: Path, not
     run_cmd([tools["InterfaceCOLMAP"], "-i", d, "-o", "scene.mvs", "-w", d], ctx, log, cwd=dense)
     ctx.progress(0.6, "densify")
     dens = [tools["DensifyPointCloud"], "scene.mvs", "-o", "scene_dense.mvs", "-w", d]
-    run_openmvs([*dens, "--resolution-level", str(level)], ctx, log, dense, notes,
+    gpu_exe = tools.get("DensifyPointCloud_gpu")
+    gpu = [gpu_exe, *dens[1:]] if gpu_exe and not _mvs_cpu_only else dens
+    run_openmvs([*gpu, "--resolution-level", str(level)], ctx, log, dense, notes,
                 cpu_args=[*dens, "--resolution-level", str(level + 1)])
+    if gpu_exe and not _mvs_cpu_only:
+        notes.append("OpenMVS 2.3.0 densify on the GPU (CUDA)")
     if _mvs_cpu_only:
         notes.append(f"OpenMVS densify on the CPU at resolution level {level + 1} (GPU path unavailable)")
     ctx.progress(0.75, "reconstruct_mesh")
@@ -270,17 +299,78 @@ def openmvs_chain(tools: dict, dense: Path, level: int, ctx: Ctx, log: Path, not
                  "obj", "-w", d], ctx, log, dense, notes)
 
 
+def known_pose_model(colmap: Path, ws: Path, db: Path, image_dir: Path, poses: list[dict], ctx: Ctx, log: Path,
+                     tag: str = "", p0: float = 0.3, colmap_poses: bool = False) -> tuple[Path, dict]:
+    """Poses fixed: manual sparse model -> point_triangulator -> bundle_adjuster (focal refined). Only the images that
+    have an entry in `poses` take part. Returns (bundle-adjusted model dir, sparse stats)."""
+    ctx.progress(p0, "known_pose_model")
+    known = ws / f"sparse_known{tag}"
+    write_text_model(known, db, poses, only_listed=True, colmap_poses=colmap_poses)
+    tri = ws / f"sparse_tri{tag}"
+    tri.mkdir(exist_ok=True)
+    args = [colmap, "point_triangulator", "--database_path", db, "--image_path", image_dir,
+            "--input_path", known, "--output_path", tri]
+    fix = pick_flag(colmap, "point_triangulator", "Mapper.fix_existing_frames", "Mapper.fix_existing_images")
+    if fix:
+        args += [fix, "1"]
+    ri = pick_flag(colmap, "point_triangulator", "refine_intrinsics")
+    if ri:
+        args += [ri, "0"]
+    run_cmd(args, ctx, log)
+
+    ctx.progress(p0 + 0.1, "bundle_adjust")
+    ba = ws / f"sparse_ba{tag}"
+    ba.mkdir(exist_ok=True)
+    args = [colmap, "bundle_adjuster", "--input_path", tri, "--output_path", ba,
+            "--BundleAdjustment.refine_focal_length", "1"]
+    for names, val in ((("BundleAdjustment.refine_principal_point",), "0"),
+                       (("BundleAdjustment.refine_extra_params",), "0"),
+                       (("BundleAdjustment.refine_rig_from_world", "BundleAdjustment.refine_extrinsics"), "0")):
+        fl = pick_flag(colmap, "bundle_adjuster", *names)
+        if fl:
+            args += [fl, val]
+    run_cmd(args, ctx, log)
+
+    mark = log.stat().st_size
+    run_cmd([colmap, "model_analyzer", "--path", ba], ctx, log)
+    return ba, sparse_stats(log.read_bytes()[mark:].decode("utf-8", "replace"))
+
+
+def dense_and_measure(tools: dict, colmap: Path, image_dir: Path, model: Path, dense: Path, outdir: Path | None,
+                      manifest: dict, level: int, ctx: Ctx, log: Path, notes: list, p0: float = 0.5,
+                      max_image_size: int = 2400) -> dict:
+    """image_undistorter -> OpenMVS chain -> (collect mesh.obj/texture.png into outdir) -> measure_obj."""
+    from .objmesh import to_protocol
+    ctx.progress(p0, "undistort")
+    run_cmd([colmap, "image_undistorter", "--image_path", image_dir, "--input_path", model,
+             "--output_path", dense, "--output_type", "COLMAP", "--max_image_size", str(max_image_size)], ctx, log)
+    openmvs_chain(tools, dense, level, ctx, log, notes)
+    if outdir is not None:
+        outdir.mkdir(parents=True, exist_ok=True)
+        obj = collect_outputs(dense, outdir)
+        return to_protocol(measure_obj(outdir / "mesh.obj", manifest))
+    objs = sorted(dense.glob("scene_texture*.obj"), key=lambda p: p.stat().st_mtime)
+    if not objs:
+        raise JobError("TextureMesh produced no OBJ")
+    return to_protocol(measure_obj(objs[-1], manifest))
+
+
 def run(upload_zip: Path, outdir: Path, ctx: Ctx) -> dict:
     t0 = time.time()
     tools = detect_tools()
     msg = missing_tools_message(tools)
     if msg:
         raise JobError(msg)
+    tools = with_gpu_densify(tools)
     colmap = tools["colmap"]
     ctx.progress(0.01, "unpack")
     root = ctx.workdir / "in"
     safe_extract(upload_zip, root)
     manifest = read_manifest(root, required=False)
+    capture = manifest.get("capture")
+    if capture in ("spin", "hybrid"):
+        from . import spin
+        return spin.run(root, manifest, outdir, ctx, tools, t0)
     poses = load_poses(root / "poses.json")
     image_dir = root / "images"
     n_img = len(list(image_dir.glob("*.jpg"))) if image_dir.exists() else 0
@@ -312,51 +402,12 @@ def run(upload_zip: Path, outdir: Path, ctx: Ctx) -> dict:
         args += [gpu_m, "1"]
     run_cmd(args, ctx, log)
 
-    ctx.progress(0.3, "known_pose_model")
-    known = ws / "sparse_known"
-    write_text_model(known, db, poses)
-    tri = ws / "sparse_tri"
-    tri.mkdir(exist_ok=True)
-    args = [colmap, "point_triangulator", "--database_path", db, "--image_path", image_dir,
-            "--input_path", known, "--output_path", tri]
-    fix = pick_flag(colmap, "point_triangulator", "Mapper.fix_existing_frames", "Mapper.fix_existing_images")
-    if fix:
-        args += [fix, "1"]
-    ri = pick_flag(colmap, "point_triangulator", "refine_intrinsics")
-    if ri:
-        args += [ri, "0"]
-    run_cmd(args, ctx, log)
-
-    ctx.progress(0.4, "bundle_adjust")
-    ba = ws / "sparse_ba"
-    ba.mkdir(exist_ok=True)
-    args = [colmap, "bundle_adjuster", "--input_path", tri, "--output_path", ba,
-            "--BundleAdjustment.refine_focal_length", "1"]
-    for names, val in ((("BundleAdjustment.refine_principal_point",), "0"),
-                       (("BundleAdjustment.refine_extra_params",), "0"),
-                       (("BundleAdjustment.refine_rig_from_world", "BundleAdjustment.refine_extrinsics"), "0")):
-        fl = pick_flag(colmap, "bundle_adjuster", *names)
-        if fl:
-            args += [fl, val]
-    run_cmd(args, ctx, log)
-
-    mark = log.stat().st_size
-    run_cmd([colmap, "model_analyzer", "--path", ba], ctx, log)
-    sparse = sparse_stats(log.read_bytes()[mark:].decode("utf-8", "replace"))
-
-    ctx.progress(0.5, "undistort")
-    dense = ws / "dense"
-    run_cmd([colmap, "image_undistorter", "--image_path", image_dir, "--input_path", ba,
-             "--output_path", dense, "--output_type", "COLMAP", "--max_image_size", "2400"], ctx, log)
-
+    ba, sparse = known_pose_model(colmap, ws, db, image_dir, poses, ctx, log)
     notes = [f"{n_img} images, {'one shared camera' if same else 'one camera per image'}"]
-    openmvs_chain(tools, dense, 0, ctx, log, notes)
-
-    ctx.progress(0.96, "collect")
     outdir.mkdir(parents=True, exist_ok=True)
-    collect_outputs(dense, outdir)
-    from .objmesh import to_protocol
-    measures = to_protocol(measure_obj(outdir / "mesh.obj", manifest))
+    measures = dense_and_measure(tools, colmap, image_dir, ba, ws / "dense", outdir, manifest,
+                                 0 if str(manifest.get("quality") or "").upper() == "DETAILED" else KNOWN_POSE_LEVEL,
+                                 ctx, log, notes)
     return {"measures": measures,
             "stats": {"backend": "pc", "duration_ms": int((time.time() - t0) * 1000), "images": n_img,
                       "sparse": sparse, "versions": {**versions(), "colmap": str(colmap)}, "notes": notes}}
