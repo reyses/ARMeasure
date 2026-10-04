@@ -7,6 +7,8 @@ import android.os.SystemClock
 import android.view.HapticFeedbackConstants
 import android.util.Log
 import android.widget.Toast
+import com.example.arruler.beam.Beam
+import com.example.arruler.beam.BeamEntries
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -320,6 +322,7 @@ class MainActivity : AppCompatActivity() {
      */
     private val scanCrashHandler = CoroutineExceptionHandler { _, e ->
         try { com.example.arruler.devlink.DevEntries.entry.recordError(applicationContext, "scan coroutine", e) } catch (_: Throwable) { }
+        beamError("scan coroutine", e.message, e)
         val t = Thread.currentThread()
         (t.uncaughtExceptionHandler ?: Thread.getDefaultUncaughtExceptionHandler())?.uncaughtException(t, e) ?: throw e
     }
@@ -347,8 +350,15 @@ class MainActivity : AppCompatActivity() {
         scan = ScanController(CoroutineScope(lifecycleScope.coroutineContext + scanCrashHandler))
         objectScan = ObjectScanController(lifecycleScope)
         hub = ProcessingHub(this, lifecycleScope)
+        runCatching { BeamEntries.entry.onCreate(application) } // before DevEntries: Beam copies the previous crash file first
         com.example.arruler.devlink.DevEntries.entry.onCreate(application)
-        lifecycleScope.launch { hub.pairing.collect { com.example.arruler.devlink.DevEntries.entry.onPairing(this@MainActivity, it) } }
+        lifecycleScope.launch {
+            hub.pairing.collect {
+                runCatching { BeamEntries.entry.onPairing(this@MainActivity, it) }
+                com.example.arruler.devlink.DevEntries.entry.onPairing(this@MainActivity, it)
+            }
+        }
+        Beam.event("gpu_gate", "status" to com.example.arruler.gpu.GpuGate.statusLine())
         handlePlaybackIntent(intent)
 
         lifecycleScope.launch {
@@ -356,7 +366,7 @@ class MainActivity : AppCompatActivity() {
                 var last = PlaybackStatus.NONE
                 ar.playbackStatus.collect { st ->
                     if (st == PlaybackStatus.FINISHED && last != st) toast("Playback finished")
-                    if (st == PlaybackStatus.IO_ERROR && last != st) toast("Playback error")
+                    if (st == PlaybackStatus.IO_ERROR && last != st) { toast("Playback error"); beamError("playback", "Playback error") }
                     last = st
                 }
             }
@@ -386,6 +396,22 @@ class MainActivity : AppCompatActivity() {
         }
 
         lifecycleScope.launch {
+            scan.analysis.collect { a ->
+                when (a) {
+                    is ScanAnalysis.Room -> {
+                        Beam.event("analyze_result", "summary" to String.format(java.util.Locale.US, "room %.2f m2, perimeter %.2f m, height %.2f m, volume %.2f m3 (phone)", a.areaM2, a.perimeterM, a.heightM, a.volumeM3))
+                        Beam.endRun("analyze_done")
+                    }
+                    is ScanAnalysis.Incomplete -> {
+                        Beam.event("analyze_result", "summary" to "incomplete, missing: ${a.missing.joinToString(", ")}")
+                        Beam.endRun("analyze_done")
+                    }
+                    null -> {}
+                }
+            }
+        }
+
+        lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 objectScan.state.collect { renderObject(it) }
             }
@@ -410,6 +436,7 @@ class MainActivity : AppCompatActivity() {
             val scanStats by scan.stats.collectAsState()
             val scanAnalysis by scan.analysis.collectAsState()
             val view = LocalView.current
+            LaunchedEffect(screen) { Beam.event("screen_change", "screen" to screen::class.simpleName) }
             DisposableEffect(view) {
                 haptic = { view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK) }
                 onDispose { haptic = {} }
@@ -429,6 +456,7 @@ class MainActivity : AppCompatActivity() {
             val recordVideo by settings.recordCaptureVideo.collectAsState()
             val useGpu by settings.useGpu.collectAsState()
             val gpuRecord by com.example.arruler.gpu.GpuGate.verification.collectAsState()
+            LaunchedEffect(gpuRecord, useGpu) { Beam.event("gpu_gate", "status" to com.example.arruler.gpu.GpuGate.statusLine(useGpu, gpuRecord)) }
             ArRulerTheme {
                 Box(Modifier.fillMaxSize().background(Color.Black)) {
                     // The AR view stays composed under the other screens so the ARCore session,
@@ -679,6 +707,7 @@ class MainActivity : AppCompatActivity() {
                         )
                     }
                     SaveSnackbar(saveNote, ::onSnackOpenFolder, ::onSnackShare) { saveNote = null }
+                    com.example.arruler.devlink.DevEntries.entry.UpdateBanner()
                     actionError?.let { err ->
                         ErrorCard(err.reason, onSendReport = { sendErrorReport(err) }, onDismiss = { actionError = null })
                     }
@@ -707,6 +736,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onArFrame() {
+        Beam.event("frame")
+        ar.centerHit.value?.let { Beam.event("hit_quality", "quality" to it.quality.name, "kind" to it.kind.name) }
         if (screen != Screen.Measure) return
         if (appMode == AppMode.SCAN) {
             ar.latestFrame?.let { scan.onFrame(it, SystemClock.elapsedRealtime()) }
@@ -725,10 +756,12 @@ class MainActivity : AppCompatActivity() {
         if (appMode == AppMode.SCAN) return
         if (appMode == AppMode.OBJECT) return
         if (appMode == AppMode.SHAPES) {
+            beamTap(x, y, "shape")
             ar.hitTest(x, y)?.let(::onShapeTap)
             return
         }
         val s = session.state.value
+        beamTap(x, y, if (s.mode == MeasureMode.AREA) "area" else "measure")
         if (s.mode == MeasureMode.AREA) return
         if (s.phase != Phase.MEASURING || s.points.isEmpty()) return
         val hit = ar.hitTest(x, y) ?: return
@@ -800,6 +833,8 @@ class MainActivity : AppCompatActivity() {
     private fun onSetAppMode(mode: AppMode) {
         if (appMode == mode) return
         if (mode.needsDepth && !ar.setDepthEnabled(true)) return toast("Depth could not be enabled")
+        Beam.event("mode_change", "mode" to mode.name)
+        if (appMode == AppMode.SCAN || appMode == AppMode.OBJECT) Beam.endRun("mode_left")
         if (appMode == AppMode.SCAN || appMode == AppMode.OBJECT) cancelJob()
         if (appMode == AppMode.SCAN) {
             scan.reset()
@@ -814,6 +849,7 @@ class MainActivity : AppCompatActivity() {
         session.setMode(mode.sessionMode)
         capture = ShapeCapture(capture.kind)
         if (mode == AppMode.SHAPES) renderShapes()
+        if (mode == AppMode.SCAN || mode == AppMode.OBJECT) Beam.startRun(mode.name.lowercase())
     }
 
     // ---- SHAPES mode ----
@@ -836,7 +872,15 @@ class MainActivity : AppCompatActivity() {
 
     // ---- SCAN mode ----
 
-    private fun onScanStartPause() { if (scan.scanning.value) scan.pause() else scan.start() }
+    private fun onScanStartPause() {
+        if (scan.scanning.value) {
+            scan.pause()
+            Beam.event("capture_stop", "mode" to "scan", "voxels" to scan.stats.value.voxels)
+        } else {
+            scan.start()
+            Beam.event("capture_start", "mode" to "scan")
+        }
+    }
 
     private fun onScanReset() {
         cancelJob()
@@ -844,6 +888,8 @@ class MainActivity : AppCompatActivity() {
         scan.reset()
         scanSaved = false
         renderer.renderCloud(emptyList())
+        Beam.endRun("cancel")
+        Beam.startRun("scan")
     }
 
     /** Analyze asks where to run (this phone, the PC, automatic) before it does anything. */
@@ -862,7 +908,7 @@ class MainActivity : AppCompatActivity() {
             val projectId = scanProjectId()
             val snap = scan.snapshot(id, projectId) ?: return@launchGuarded toast("Nothing scanned yet")
             withContext(Dispatchers.IO) { runCatching { ScanFiles.save(scansRoot(this@MainActivity), snap) } }
-                .onFailure { toast("Could not save the scan: ${it.message}") }
+                .onFailure { beamError("save scan", it.message, it); toast("Could not save the scan: ${it.message}") }
             scan3dSnapshot = snap
             scan3dTextured = null
             scan3dReturnTo = Screen.Measure
@@ -880,6 +926,7 @@ class MainActivity : AppCompatActivity() {
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_LAST_PROJECT, it).apply()
             }
     } catch (e: IOException) {
+        beamError("scan project", e.message, e)
         toast("Storage error: ${e.message}")
         null
     }
@@ -921,9 +968,9 @@ class MainActivity : AppCompatActivity() {
 
     private val objectActions by lazy {
         ObjectActions(
-            onResize = objectScan::resize,
+            onResize = { dim, delta -> objectScan.resize(dim, delta); beamBoxSize() },
             onRotate = { objectScan.rotate() },
-            onScale = objectScan::scale,
+            onScale = { f -> objectScan.scale(f); beamBoxSize() },
             onFit = ::onObjectFit,
             onChooseMode = ::onChooseCaptureMode,
             onBeginHybridSpin = ::onBeginHybridSpin,
@@ -968,6 +1015,7 @@ class MainActivity : AppCompatActivity() {
     /** The 12 box edges as thin cylinders; redrawn only when the box changes. */
     private fun renderObject(s: ObjectUiState) {
         if (appMode != AppMode.OBJECT || s.box == renderedBox) return
+        if (renderedBox == null) s.box?.let { beamBox("box_placed", it) }
         renderedBox = s.box
         renderer.render(emptyList())
         renderer.renderExtra(
@@ -984,6 +1032,7 @@ class MainActivity : AppCompatActivity() {
     private fun onObjectTapAt(x: Float, y: Float) {
         val phase = objectScan.phase
         if (phase != ObjectPhase.IDLE && phase != ObjectPhase.PLACED) return
+        beamTap(x, y, "object")
         val hit = ar.hitTest(x, y) ?: return toast("Point at the object so the camera can see its surface")
         val tap = hit.point.toVec3()
         val planeY = SupportPlanePick.pick(tap, ar.supportPlaneCandidates(hit.point))
@@ -1052,7 +1101,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onObjectDragEnd() {
-        if (dragOffset != null) { dragOffset = null; snapHaptic() }
+        if (dragOffset != null) {
+            dragOffset = null
+            snapHaptic()
+            objectScan.state.value.box?.let { Beam.event("box_moved", "cx" to it.centre.x, "cy" to it.centre.y, "cz" to it.centre.z) }
+        }
     }
 
     /** A firmer tick for a snap (the box landing on the object, the end of a drag). */
@@ -1071,6 +1124,7 @@ class MainActivity : AppCompatActivity() {
             CaptureMode.SPIN -> {
                 val box = objectScan.state.value.box ?: return
                 objectScan.startSpin()
+                Beam.event("capture_start", "mode" to "object_spin")
                 startCaptureVideo()
                 pendingPhotos = null
                 spinCapture.startSpinCapture(box, SupportPlane.horizontal(box.centre.y), hybrid = false)
@@ -1082,17 +1136,20 @@ class MainActivity : AppCompatActivity() {
     private fun onBeginHybridSpin() {
         val box = objectScan.state.value.box ?: return
         objectScan.beginHybridSpin()
+        Beam.event("capture_start", "mode" to "object_hybrid_spin")
         spinCapture.startSpinCapture(box, SupportPlane.horizontal(box.centre.y), hybrid = true)
     }
 
     private fun onObjectResume() {
         val box = objectScan.state.value.box
         objectScan.start()
+        Beam.event("capture_start", "mode" to "object_resume")
         if (box != null) captureObservers.forEach { it.onCaptureStart(box, SupportPlane.horizontal(box.centre.y), resumed = true) }
     }
 
     private fun onObjectPause() {
         objectScan.pause()
+        Beam.event("capture_stop", "frames" to walkKeyframes.keptCount)
         captureObservers.forEach { it.onCapturePause() }
     }
 
@@ -1105,12 +1162,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun stopCaptureVideo() {
-        if (captureVideo != null && ar.recorder.state.value is RecordingState.Recording) ar.recorder.stop()
+        if (captureVideo != null && ar.recorder.state.value is RecordingState.Recording) {
+            ar.recorder.stop()
+            captureVideo?.let { Beam.attach("arcore_recording", it) }
+        }
     }
 
     private fun onObjectFit() {
         objectScan.fit { ok ->
             runOnUiThread {
+                Beam.event("box_fit", "found" to ok)
+                beamBoxSize()
                 toastLong(
                     if (ok) "Box fitted to the object"
                     else "Not enough depth near the tap yet. Move the phone slowly around the object, then tap Fit again."
@@ -1127,6 +1189,7 @@ class MainActivity : AppCompatActivity() {
         pendingPhotos = null
         // DETAILED and the walk of a HYBRID still collect depth for the coverage dome; the cloud is only used by the phone path and the hybrid ZIP
         objectScan.start(if (q == ProcQuality.FINE) ScanQuality.FINE else ScanQuality.QUICK, pendingMode)
+        Beam.event("capture_start", "mode" to "object_${pendingMode.name.lowercase()}", "quality" to q.name)
         startCaptureVideo()
         captureObservers.forEach { it.onCaptureStart(box, SupportPlane.horizontal(box.centre.y), resumed = false) }
     }
@@ -1173,6 +1236,7 @@ class MainActivity : AppCompatActivity() {
     private fun onObjectFinish() {
         val before = objectScan.state.value
         objectScan.pause()
+        Beam.event("capture_stop", "frames" to walkKeyframes.keptCount, "finish" to true)
         if (before.captureMode == CaptureMode.SPIN) return onSpinFinished()
         if (before.spinning) spinCapture.stopSpinCapture()
         stopCaptureVideo()
@@ -1259,6 +1323,7 @@ class MainActivity : AppCompatActivity() {
                         procUi = null
                         objectScan.backToPaused()
                         toastLong("Object scan failed: ${st.message}")
+                        beamError("object job", "Object scan failed: ${st.message}")
                     }
                     is ProcessingState.NeedsConfirmation -> {
                         procUi = null
@@ -1275,6 +1340,7 @@ class MainActivity : AppCompatActivity() {
         if (outcome == null) {
             procUi = null
             objectScan.backToPaused()
+            beamError("object result", "The result has no object dimensions")
             return toastLong("The result has no object dimensions")
         }
         val box = pendingBox
@@ -1305,6 +1371,11 @@ class MainActivity : AppCompatActivity() {
         objResult = ObjectResultState(outcome, mesh, null, extras, textured, textured?.bestPhoto, captureVideo)
         procUi = null
         objectScan.showResult()
+        Beam.event(
+            "analyze_result",
+            "summary" to String.format(java.util.Locale.US, "object %.3f x %.3f x %.3f m, volume %.4f m3 (%s)", outcome.lengthM, outcome.widthM, outcome.heightM, outcome.volume.recommended, outcome.backend),
+        )
+        Beam.endRun("finish")
     }
 
     /** Reads mesh.ply (or mesh.obj) from a PC result ZIP. */
@@ -1318,6 +1389,8 @@ class MainActivity : AppCompatActivity() {
     private fun onObjectReset() {
         cancelJob()
         resetObject()
+        Beam.endRun("cancel")
+        if (appMode == AppMode.OBJECT) Beam.startRun("object")
     }
 
     private fun resetObject() {
@@ -1343,6 +1416,7 @@ class MainActivity : AppCompatActivity() {
         cancelJob()
         if (appMode == AppMode.OBJECT) objectScan.backToPaused()
         toast("Cancelled")
+        Beam.event("job_cancelled")
     }
 
     private fun cancelJob() {
@@ -1405,6 +1479,7 @@ class MainActivity : AppCompatActivity() {
     private fun showActionError(action: String, e: Throwable) {
         Log.e(TAG, "$action failed", e)
         try { com.example.arruler.devlink.DevEntries.entry.recordError(applicationContext, action, e) } catch (_: Exception) { }
+        beamError(action, e.message, e)
         val header = "ARMeasure ${BuildConfig.VERSION_NAME} commit ${BuildConfig.GIT_COMMIT} (${BuildConfig.BUILD_TYPE}), " +
             "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, Android ${android.os.Build.VERSION.RELEASE}, " +
             "recording ${ar.recorder.state.value::class.simpleName}, screen ${screen::class.simpleName}, mode $appMode"
@@ -1444,6 +1519,7 @@ class MainActivity : AppCompatActivity() {
         try {
             MeshShare.share(this, mesh, format)
         } catch (e: Exception) {
+            beamError("share object", e.message, e)
             toast("Share failed: ${e.message}")
         }
     }
@@ -1472,6 +1548,7 @@ class MainActivity : AppCompatActivity() {
                 is ProjectChoice.New -> repo.createProject(choice.name)
             }
         } catch (e: IOException) {
+            beamError("save object", e.message, e)
             return toast("Storage error: ${e.message}")
         }
         lastUsedProjectId = project.id
@@ -1496,7 +1573,7 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     toast("Saved to ${project.name}")
                 }
-            }.onFailure { toast("Could not save the object: ${it.message}") }
+            }.onFailure { beamError("save object", it.message, it); toast("Could not save the object: ${it.message}") }
         }
     }
 
@@ -1629,8 +1706,8 @@ class MainActivity : AppCompatActivity() {
         runWithStoragePermission {
             lifecycleScope.launch {
                 withContext(Dispatchers.IO) { runCatching { block(PublicStorage.exporter(this@MainActivity)) } }
-                    .onSuccess { saveNote = SaveNote(ExportNames.savedMessage(projectName), it) }
-                    .onFailure { toastLong("Could not copy to Downloads: ${it.message}") }
+                    .onSuccess { saveNote = SaveNote(ExportNames.savedMessage(projectName), it); Beam.event("export", "files" to it.files.map { f -> f.name }, "folder" to it.folder) }
+                    .onFailure { beamError("copy to Downloads", it.message, it); toastLong("Could not copy to Downloads: ${it.message}") }
             }
         }
     }
@@ -1642,7 +1719,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun onSnackShare(note: SaveNote) {
         saveNote = null
-        try { PublicStorage.share(this, note.result) } catch (e: Exception) { toast("Share failed: ${e.message}") }
+        try { PublicStorage.share(this, note.result) } catch (e: Exception) { beamError("share export", e.message, e); toast("Share failed: ${e.message}") }
     }
 
 
@@ -1651,6 +1728,7 @@ class MainActivity : AppCompatActivity() {
     /** The picker's answer for Analyze: the phone keeps the existing path, the PC gets a job. */
     private fun runScanAnalyze(pref: UserPref) {
         val n = scan.stats.value.voxels
+        Beam.event("analyze_start", "pref" to pref.name, "voxels" to n)
         scanSaved = false
         scanPcResult = null
         val decision = hub.route(JobType.SCAN_ANALYZE, null, JobEstimate(pointCount = n), pref)
@@ -1681,10 +1759,13 @@ class MainActivity : AppCompatActivity() {
                         val mesh = st.resultZip?.let { loadResultMesh(it) }
                         procUi = null
                         scanPcResult = ScanPcResult(st.result, planes, mesh)
+                        Beam.event("analyze_result", "summary" to "scan analyzed on ${st.result.stats.backend}: ${planes.size} surfaces, mesh ${mesh != null}")
+                        Beam.endRun("analyze_done")
                     }
                     is ProcessingState.Failed -> {
                         procUi = null
                         toastLong("Analysis failed: ${st.message}")
+                        beamError("scan analysis", "Analysis failed: ${st.message}")
                     }
                     is ProcessingState.NeedsConfirmation -> {
                         procUi = null
@@ -1777,6 +1858,7 @@ class MainActivity : AppCompatActivity() {
             val room = draft.captured.toSavedRoom(repo.newRoomId(), name, snap, draft.heightM, System.currentTimeMillis())
             if (!repo.addRoom(project.id, room)) return toast("Project not found")
             planFrame = draft.captured.frame
+            Beam.event("export", "what" to "room", "name" to name, "project" to project.name)
             lastUsedProjectId = project.id
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_LAST_PROJECT, project.id).apply()
             val s = session.state.value
@@ -1790,6 +1872,7 @@ class MainActivity : AppCompatActivity() {
                 toast("Saved to ${project.name}")
             }
         } catch (e: IOException) {
+            beamError("save room", e.message, e)
             toast("Could not save: ${e.message}")
         }
     }
@@ -1799,13 +1882,14 @@ class MainActivity : AppCompatActivity() {
             val file = PlanShare.export(this, project, format, unit, angles)
             PlanShare.share(this, file, format, project.name)
         } catch (e: Exception) {
+            beamError("export plan", e.message, e)
             toast("Export failed: ${e.message}")
         }
     }
 
     /** Runs a repository write, turning a disk error into a toast. */
     private fun guarded(block: () -> Unit) {
-        try { block() } catch (e: IOException) { toast("Storage error: ${e.message}") }
+        try { block() } catch (e: IOException) { beamError("storage", e.message, e); toast("Storage error: ${e.message}") }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -1829,7 +1913,7 @@ class MainActivity : AppCompatActivity() {
         clearAll()
         planFrame = null
         screen = Screen.Measure
-        if (!ar.startPlayback(uri)) toast("Could not open recording")
+        if (!ar.startPlayback(uri)) { toast("Could not open recording"); beamError("playback", "Could not open recording") }
     }
 
     private fun logPoint(p: MeasurePoint) {
@@ -1843,6 +1927,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun state0Unit(): Units = session.state.value.unit
+
+    /** One-liner into Beam: a tap with its view size (Beam never throws). */
+    private fun beamTap(x: Float, y: Float, target: String) {
+        val (w, h) = ar.viewSize
+        Beam.event("tap", "x" to x, "y" to y, "view_w" to w, "view_h" to h, "target" to target)
+    }
+
+    private fun beamBox(type: String, b: ObjectBox) =
+        Beam.event(type, "cx" to b.centre.x, "cy" to b.centre.y, "cz" to b.centre.z, "w" to b.w, "d" to b.d, "h" to b.h, "yaw" to b.yaw)
+
+    private fun beamBoxSize() { objectScan.state.value.box?.let { beamBox("box_resized", it) } }
+
+    /** An error event (also takes a window snapshot inside Beam). */
+    private fun beamError(where: String, message: String?, e: Throwable? = null) =
+        Beam.event("error", "where" to where, "message" to message, "stack" to e?.stackTraceToString())
 
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
 

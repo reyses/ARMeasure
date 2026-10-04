@@ -13,7 +13,11 @@ A release APK records and uploads nothing.
 - Camera video of the owner's home (the ARCore recording of a Scan / Object run), window snapshots (540 px wide, JPEG) and the
   optional full screen recording go **only to his own PC**, over the tailnet or the LAN. The public Cloudflare tunnel URL is
   refused unless "Allow over the public tunnel" is switched on (default off).
-- Nothing is uploaded on mobile data unless "Wi-Fi only" is switched off (default on).
+- Network policy (default): a bundle of 20 MB or less is uploaded over any network when the paired URL is a tailnet or LAN URL
+  (tailnet traffic over mobile data is fine for small payloads); a bundle over 20 MB waits for Wi-Fi (unmetered network) unless
+  "Allow large uploads on mobile data" is switched on (default off) or "Wi-Fi only" is switched off. The public tunnel URL is
+  never used on mobile data while "Wi-Fi only" is on. Logs, crash and diagnostics (Dev link, `POST /v1/dev/logs`) are small and
+  not gated by Beam's Wi-Fi switch.
 - "Beam to PC" off = nothing is recorded beyond the features that already exist (the ARCore recording he starts himself,
   Dev link logs). Nothing is recorded either until a PC is paired.
 - Bundles live in `files/beam/` (app-private) until the PC confirms the sha256, then they are deleted from the phone. On the
@@ -35,7 +39,8 @@ Rows it shows (all in `BeamEntries.SettingsSection`, stored in SharedPreferences
 | row | default | meaning |
 |---|---|---|
 | Beam to PC | ON (acts only when a PC is paired) | master switch |
-| Wi-Fi only | ON | JobScheduler constraint UNMETERED plus a second check (NET_CAPABILITY_NOT_METERED) |
+| Wi-Fi only | ON | bundles over 20 MB wait for an unmetered network (NET_CAPABILITY_NOT_METERED); small ones are not held back (tailnet / LAN URL) |
+| Allow large uploads on mobile data | OFF | lets bundles over 20 MB use mobile data too (tailnet / LAN URL; the tunnel still needs "Wi-Fi only" off) |
 | Allow over the public tunnel | OFF | otherwise only tailnet / LAN pairing URLs are used (`UrlKind`) |
 | Include camera video | ON | the ARCore recording of the session goes into the bundle |
 | Include screen snapshots | ON | PixelCopy snapshots every 2 s while a capture session is active |
@@ -53,7 +58,16 @@ Plus one status line ("Upload: uploading x.zip 42 %", "waiting for Wi-Fi", ...).
 - A session whose process died is found at the next launch (no `closed.json`), bundled with reason `crash` plus the crash text.
 - An app session with nothing but start / stop / fps / thermal events is not worth a bundle and is dropped.
 
-## Call sites to add (MainActivity unless noted; none are in place yet, the crash-fix drone owns these files)
+## Call sites (all wired 2026-10-03; MainActivity unless noted)
+
+Wiring notes: item 3 starts a run when the mode becomes Scan or Object and ends it with "mode_left"; resets (`onScanReset`,
+`onObjectReset`) end it with "cancel" and start a fresh run while the mode stays; a finished Object result ends the run with
+"finish" (after an `analyze_result` event), a finished Scan analysis (phone collector on `scan.analysis`, or the PC result) with
+"analyze_done". Item 6 is in `onArFrame` from `ar.centerHit`. Item 9: `box_placed` in `renderObject` (first box of a placement),
+`box_moved` at drag end, `box_resized` after resize/scale buttons and after Fit. Item 11 attaches in `stopCaptureVideo`. Item 12
+`analyze_start` is in `runScanAnalyze` (the real start, after the picker). Item 14 attaches in `MeshShare`, `PlanShare`,
+`ScanFiles.save`, and `publicExport` writes an `export` event with the file names. Item 16: `beamError(...)` at the catch / failure
+sites, in `showActionError` (the ActionError card) and in the scan coroutine handler. Original plan text follows.
 
 `Beam.event(type, "key" to value, ...)` is safe from any thread, never throws and returns at once in release.
 

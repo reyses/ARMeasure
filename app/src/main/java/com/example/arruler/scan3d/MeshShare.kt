@@ -20,6 +20,7 @@ object MeshShare {
             MeshExport.OBJ -> out.writeText(mesh.toObj("object"), Charsets.UTF_8)
             MeshExport.PLY -> out.writeBytes(mesh.toBinaryPly())
         }
+        com.example.arruler.beam.Beam.attach("export", out)
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", out)
         val send = Intent(Intent.ACTION_SEND).apply {
             type = format.mime

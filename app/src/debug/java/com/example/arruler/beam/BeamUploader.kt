@@ -262,13 +262,18 @@ class BeamQueue(private val dir: File) {
 }
 
 /** Runs the whole queue once with one transport; used by the JobService and by tests. */
-class QueueRunner(private val queue: BeamQueue, private val uploader: ChunkedUploader) {
+class QueueRunner(private val queue: BeamQueue, private val uploaderFor: (BeamQueue.Entry) -> ChunkedUploader?) {
+    constructor(queue: BeamQueue, uploader: ChunkedUploader) : this(queue, { uploader })
+
     data class Summary(val sent: Int, val kept: Int, val rejected: Int, val lastReason: String)
 
     fun run(onProgress: (name: String, p: Float) -> Unit = { _, _ -> }, cancelled: () -> Boolean = { false }): Summary {
         var sent = 0; var kept = 0; var rejected = 0; var reason = ""
         for (e in queue.pending()) {
             if (cancelled()) { kept++; continue }
+            // null = this bundle may not use the current network (large bundle on mobile data): it stays queued.
+            val uploader = uploaderFor(e)
+            if (uploader == null) { kept++; reason = "waiting for Wi-Fi"; continue }
             val r = uploader.upload(e.zip, e.state, { queue.save(e.stateFile, it) }, { onProgress(e.state.name, it) }, cancelled)
             when (r) {
                 is UploadResult.Done -> { queue.remove(e); sent++ }

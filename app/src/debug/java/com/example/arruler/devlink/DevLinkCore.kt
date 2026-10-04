@@ -26,6 +26,8 @@ data class ApkInfo(
     val size: Long = 0,
     val sha256: String = "",
     val url: String = "",
+    /** Optional: the APK file's modification time (epoch seconds or ms) when the server sends it; 0 = unknown. */
+    val mtime: Long = 0,
 )
 
 sealed interface UpdateCheck {
@@ -70,6 +72,68 @@ object UpdateDecision {
     }
 
     fun upToDateText(commit: String) = "Up to date (commit $commit)"
+}
+
+/** Pure decisions of the automatic update check (banner, throttle, mobile-data prompt). JVM-tested. */
+object AutoUpdate {
+    const val MIN_INTERVAL_MS = 30L * 60 * 1000
+
+    /** At most one check per [intervalMs]; a clock that went backwards allows one. */
+    fun shouldCheck(nowMs: Long, lastCheckMs: Long, intervalMs: Long = MIN_INTERVAL_MS): Boolean =
+        lastCheckMs <= 0L || nowMs < lastCheckMs || nowMs - lastCheckMs >= intervalMs
+
+    fun short(commit: String): String = commit.trim().take(7)
+
+    fun bannerText(installedCommit: String, remoteCommit: String): String =
+        "Update available (${short(installedCommit)} → ${short(remoteCommit)}) · Install"
+
+    /** A server time in seconds or milliseconds as milliseconds; 0 when unknown. */
+    fun toMillis(v: Long): Long = when {
+        v <= 0L -> 0L
+        v < 100_000_000_000L -> v * 1000
+        else -> v
+    }
+
+    /** The offered file counts as newer unless both times are known and it is not after the installed build's install time. */
+    fun isNewerFile(remoteMtime: Long, installedUpdatedMs: Long): Boolean {
+        val r = toMillis(remoteMtime)
+        return r == 0L || installedUpdatedMs <= 0L || r > installedUpdatedMs
+    }
+
+    sealed interface Offer {
+        data class Show(val info: ApkInfo) : Offer
+        data class None(val why: String) : Offer
+    }
+
+    /** Whether to show the banner: a different commit (or higher versionCode), a newer file, and not dismissed by the user. */
+    fun offer(installedCommit: String, installedVersionCode: Int, installedUpdatedMs: Long, remote: ApkInfo, dismissedCommit: String?): Offer =
+        when (val d = UpdateDecision.decide(installedCommit, installedVersionCode, remote)) {
+            is UpdateCheck.UpToDate -> Offer.None("up to date")
+            is UpdateCheck.Unusable -> Offer.None(d.why)
+            is UpdateCheck.Available -> when {
+                !isNewerFile(remote.mtime, installedUpdatedMs) -> Offer.None("the PC's file is older than this install")
+                dismissedCommit != null && UpdateDecision.sameCommit(dismissedCommit, remote.commit) -> Offer.None("dismissed")
+                else -> Offer.Show(d.info)
+            }
+        }
+
+    /** "67 MB" (binary megabytes, rounded, at least 1). */
+    fun sizeText(bytes: Long): String = "${maxOf(1L, (bytes + 512 * 1024) / (1024 * 1024))} MB"
+
+    fun mobilePrompt(bytes: Long): String = "Download ${sizeText(bytes)} on mobile data?"
+
+    sealed interface Gate {
+        data object Go : Gate
+        data class AskMobile(val prompt: String) : Gate
+        data object NoNetwork : Gate
+    }
+
+    /** [metered]: true on mobile data, false on an unmetered network, null when offline. */
+    fun downloadGate(metered: Boolean?, alwaysAllowMobile: Boolean, sizeBytes: Long): Gate = when {
+        metered == null -> Gate.NoNetwork
+        !metered || alwaysAllowMobile -> Gate.Go
+        else -> Gate.AskMobile(mobilePrompt(sizeBytes))
+    }
 }
 
 object Sha256 {

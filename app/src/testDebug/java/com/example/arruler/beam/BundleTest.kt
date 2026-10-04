@@ -192,8 +192,31 @@ class UploadGateTest {
         assertEquals("Beam to PC is off", UploadGate.blockedReason(p.copy(beamToPc = false), true, urls, false))
         assertEquals("no PC paired", UploadGate.blockedReason(p, false, urls, false))
         assertEquals("no network", UploadGate.blockedReason(p, true, urls, null))
-        assertTrue(UploadGate.blockedReason(p, true, urls, metered = true)!!.startsWith("waiting for Wi-Fi"))
-        assertNull(UploadGate.blockedReason(p.copy(wifiOnly = false), true, urls, metered = true))
+        // small bundles go over a tailnet / LAN URL on mobile data even with Wi-Fi only
+        assertNull(UploadGate.blockedReason(p, true, urls, metered = true))
+        assertTrue(UploadGate.blockedReason(p, true, urls, metered = true, bytes = 30L * 1024 * 1024)!!.startsWith("waiting for Wi-Fi"))
+        assertNull(UploadGate.blockedReason(p.copy(allowLargeOnMobile = true), true, urls, metered = true, bytes = 30L * 1024 * 1024))
+        assertNull(UploadGate.blockedReason(p.copy(wifiOnly = false), true, urls, metered = true, bytes = 30L * 1024 * 1024))
         assertTrue(UploadGate.blockedReason(p, true, listOf(tunnel), false)!!.contains("tunnel"))
+    }
+
+    @Test fun mobileDataUrlsBySizeAndKind() {
+        val p = BeamPolicy(allowOverTunnel = true)
+        val big = 21L * 1024 * 1024
+        val small = 20L * 1024 * 1024
+        assertEquals(listOf(tail, lan), UploadGate.urlsFor(p, urls, small, metered = true)) // the public tunnel never on mobile with Wi-Fi only
+        assertEquals(emptyList<String>(), UploadGate.urlsFor(p, urls, big, metered = true))
+        assertEquals(listOf(tail, lan), UploadGate.urlsFor(p.copy(allowLargeOnMobile = true), urls, big, metered = true))
+        assertEquals(urls, UploadGate.urlsFor(p, urls, big, metered = false)) // Wi-Fi: everything allowed
+        assertEquals(urls, UploadGate.urlsFor(p.copy(wifiOnly = false), urls, big, metered = true))
+        assertEquals(emptyList<String>(), UploadGate.urlsFor(p, urls, small, metered = null))
+        assertEquals(listOf(tail, lan), UploadGate.urlsFor(BeamPolicy(), urls, small, metered = true))
+    }
+
+    @Test fun needsWifiOnlyForLargeBundlesWithBothSwitchesDefault() {
+        assertTrue(UploadGate.needsWifi(BeamPolicy(), 21L * 1024 * 1024))
+        assertFalse(UploadGate.needsWifi(BeamPolicy(), 20L * 1024 * 1024))
+        assertFalse(UploadGate.needsWifi(BeamPolicy(allowLargeOnMobile = true), 500L * 1024 * 1024))
+        assertFalse(UploadGate.needsWifi(BeamPolicy(wifiOnly = false), 500L * 1024 * 1024))
     }
 }

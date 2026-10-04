@@ -243,7 +243,11 @@ class ArSessionController(
         lastFrame = frame
         recorder.onFrame(session, frame)
         _playbackStatus.value = session.playbackStatus
-        _trackingState.value = frame.camera.trackingState
+        val tracking = frame.camera.trackingState
+        if (tracking != _trackingState.value) {
+            com.example.arruler.beam.Beam.event("tracking_state", "state" to tracking.name, "reason" to frame.camera.trackingFailureReason.name)
+        }
+        _trackingState.value = tracking
         val center = hitTestCenter()
         _hasSurface.value = center != null
         _centerHit.value = center?.let { HitInfo(it.quality, it.kind) }

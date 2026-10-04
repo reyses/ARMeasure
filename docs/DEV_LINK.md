@@ -61,6 +61,21 @@ Contents: `logs` = a header line (app, version, commit, build type, device, Andr
 
 Storage (as implemented in pc-server/armeasure_pc/devlink.py, 2026-10-03): `pc-server\data\devlogs\<yyyy-mm-dd>\<id>-<kind>-<device>.txt` holding the uploaded file's bytes. `id` = `<kind-first-letter>-<yyyymmdd-HHmmss>-<4 random hex>` (e.g. `L-20261003-101500-9f3a`). The device name is sanitised to `[A-Za-z0-9._-]`, max 40 chars. Uploads over 20 MB get 413; the newest 500 uploads are kept. The server prepends one header line `# app=<app> commit=<commit> device=<device> kind=<kind>` from the multipart fields; the client address is in `data\access.log`.
 
+## Automatic update check (debug builds)
+
+`AutoUpdater` (src/debug/.../devlink/AutoUpdater.kt) calls `GET /v1/dev/apk?package=<applicationId>` over the paired PcLink (tailnet
+first) at app start and when the app returns to the foreground, at most once per 30 minutes (a changed pairing is checked at once).
+It shows a non-blocking banner "Update available (abc1234 -> def5678) - Install" when the server's commit differs from
+`BuildConfig.GIT_COMMIT` (or its versionCode is higher) and the file is newer, plus an optional notification (channel "Dev updates").
+Install = the same sha256-verified download and `PackageInstaller` flow as "Update from PC", with a progress bar. On mobile data
+it asks "Download 67 MB on mobile data?" with "Always allow"; a missing "Install unknown apps" permission opens
+`ACTION_MANAGE_UNKNOWN_APP_SOURCES` for this package and the install resumes when the user comes back. Settings > Dev has the three
+switches (check at start, always download on mobile data, notify). "Later" silences that commit until the PC offers another.
+
+"File is newer": the apk answer may carry an optional `"mtime"` (epoch seconds or ms). When it is present and not after the
+phone's install time (`lastUpdateTime`) the offer is dropped; without it the commit comparison alone decides (the current
+server sends no `mtime`).
+
 ## Notes
 
 - The Settings > Dev section (debug builds) shows the build commit, which pairing URL answered last (tailnet / LAN / tunnel) and the two buttons.

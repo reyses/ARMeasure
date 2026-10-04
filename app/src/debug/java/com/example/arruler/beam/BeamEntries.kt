@@ -329,7 +329,8 @@ private object DebugBeamEntry : BeamEntry {
                 style = MaterialTheme.typography.bodySmall,
             )
             row("Beam to PC", p.beamToPc) { set(p.copy(beamToPc = it)) }
-            row("Wi-Fi only", p.wifiOnly) { set(p.copy(wifiOnly = it)) }
+            row("Wi-Fi only (bundles over 20 MB; small ones use the tailnet / LAN on any network)", p.wifiOnly) { set(p.copy(wifiOnly = it)) }
+            row("Allow large uploads on mobile data", p.allowLargeOnMobile) { set(p.copy(allowLargeOnMobile = it)) }
             row("Allow over the public tunnel", p.allowOverTunnel) { set(p.copy(allowOverTunnel = it)) }
             row("Include camera video", p.includeCameraVideo) { set(p.copy(includeCameraVideo = it)) }
             row("Include screen snapshots", p.includeScreenSnapshots) { set(p.copy(includeScreenSnapshots = it)) }

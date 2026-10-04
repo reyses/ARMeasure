@@ -34,6 +34,25 @@ A production-ready AR ruler application optimized for Android flagship devices, 
 - **Target SDK 37:** Built to comply with Android 15+ Edge-to-Edge display enforcement and modern Android security guidelines.
 - **ARCore 1.45+:** Updated tracking and camera framework support.
 
+## Testing workflow (debug builds, phone away from the PC)
+
+1. Install the debug APK once (USB or `adb install`). After that no cable and no Wi-Fi debugging are needed.
+2. Pair once: Settings > PC > paste the pairing JSON from the PC server (the QR works too). The pairing lists the Tailscale
+   address first, so everything below also works on mobile data as long as Tailscale is on in the phone and the PC.
+3. Updates: build on the PC into `D:\APK`; the app asks the PC at start and when it returns to the foreground (at most once
+   per 30 minutes) and shows "Update available (abc1234 -> def5678) - Install". Install downloads (about 67 MB, asks once on
+   mobile data, "Always allow" stops the question), checks sha256 and hands the APK to the system installer. The first time
+   Android opens "Install unknown apps"; allow it and the install resumes. Settings > Dev > "Update from PC" does the same by hand.
+4. Beam: with a PC paired, every Scan and Object run (and each app session) is sent to the PC as one bundle: event timeline,
+   screen snapshots, the ARCore video, exports, logcat, crash. Small bundles (under 20 MB) go over any network; larger ones wait
+   for Wi-Fi unless Settings > Beam to PC > "Allow large uploads on mobile data" is on. Settings > Dev > "Send logs + diagnostics to PC" sends a
+   one-off report.
+5. On the PC the bundles land in `pc-server\data\devbundles\<date>\<session-id>\` (logs in `pc-server\data\devlogs`). Read one with
+   `cd pc-server` then `C:envsrmeasure-pc\Scripts\python.exe -m armeasure_pc inspect-bundle latest` (it writes `summary.md`,
+   `contact_sheet.jpg`, `video_frames/` and `timeline.html` into the bundle folder). See docs/BEAM.md and docs/DEV_LINK.md.
+
+Release builds contain none of this (no Beam, no dev link, no install permission).
+
 ## Build Instructions
 1. Open project in Android Studio
 2. Sync Gradle files

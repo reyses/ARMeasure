@@ -42,6 +42,7 @@ object PlanShare {
             ExportFormat.DXF -> file.writeText(toDxf(plan), Charsets.UTF_8)
             ExportFormat.JSON -> file.writeText(ProjectCodec.encode(project), Charsets.UTF_8)
         }
+        com.example.arruler.beam.Beam.attach("export", file)
         return file
     }
 

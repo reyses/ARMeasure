@@ -15,6 +15,9 @@ object DevEntries {
         override suspend fun sendReport(context: Context, pairing: PairingInfo?, text: String): String? = null
 
         @Composable
+        override fun UpdateBanner() = Unit
+
+        @Composable
         override fun SettingsSection(pairing: PairingInfo?) = Unit
     }
 }

@@ -8,8 +8,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.foundation.clickable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -23,7 +30,11 @@ import com.example.arruler.depth.ScanStats
 import com.example.arruler.measure.Units
 import com.example.arruler.measure.shapes.ShapeFormat
 
-const val SCAN_HINT = "Move slowly, sweep the walls, floor and ceiling"
+/** The full instruction (shown in the info sheet). */
+const val SCAN_HINT = "Walk around the room. Stay within about 1.5 m of each wall, then point at the floor and the ceiling for a few seconds."
+
+/** The one line on the scan screen. */
+const val SCAN_HINT_SHORT = "Walk the room, stay within 1.5 m of walls, then floor and ceiling"
 
 /** Result-card rows (name to value) of a scanned room, in [units]. */
 fun scanRoomLines(units: Units, r: ScanAnalysis.Room): List<Pair<String, String>> = listOf(
@@ -51,6 +62,15 @@ fun BoxScope.ScanControls(
 ) {
     val view = LocalView.current
     val haptic = { view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK); Unit }
+    var hintOpen by remember { mutableStateOf(false) }
+    if (hintOpen) {
+        AlertDialog(
+            onDismissRequest = { hintOpen = false },
+            title = { Text("Scanning a room") },
+            text = { Text(SCAN_HINT) },
+            confirmButton = { TextButton(onClick = { hintOpen = false }) { Text("OK") } },
+        )
+    }
 
     Column(
         modifier = Modifier
@@ -95,11 +115,12 @@ fun BoxScope.ScanControls(
                 .padding(horizontal = 14.dp, vertical = 4.dp),
         )
         Text(
-            if (analyzing) "Analyzing..." else SCAN_HINT,
+            (if (analyzing) "Analyzing..." else SCAN_HINT_SHORT) + if (analyzing) "" else "  ⓘ",
             color = Color.White,
             fontSize = 15.sp,
             modifier = Modifier
                 .clip(RoundedCornerShape(16.dp))
+                .clickable(enabled = !analyzing) { hintOpen = true }
                 .background(Color.Black.copy(alpha = 0.5f))
                 .padding(horizontal = 14.dp, vertical = 6.dp),
         )

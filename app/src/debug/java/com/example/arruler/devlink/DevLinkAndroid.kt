@@ -61,11 +61,13 @@ private object DebugDevEntry : DevEntry {
 
     override fun onCreate(app: Application) {
         CrashRecorder.install(File(app.filesDir, "crash"))
+        AutoUpdater.install(app)
     }
 
     override fun onPairing(context: Context, pairing: PairingInfo?) {
         if (pairing == null) return
         val app = context.applicationContext
+        AutoUpdater.onPairing(app, pairing)
         val store = CrashStore(File(app.filesDir, "crash"))
         if (store.pending() == null || !sendingCrash.compareAndSet(false, true)) return
         scope.launch {
@@ -92,6 +94,9 @@ private object DebugDevEntry : DevEntry {
         if (pairing == null) return null
         return DevLinkClient(context.applicationContext, pairing).sendText("crash", text) // the PC accepts logs|crash|diagnostics; a handled error is filed as a crash report
     }
+
+    @Composable
+    override fun UpdateBanner() = AutoUpdateBanner()
 
     @Composable
     override fun SettingsSection(pairing: PairingInfo?) {
@@ -132,6 +137,7 @@ private object DebugDevEntry : DevEntry {
             progress?.let { LinearProgressIndicator(progress = { it }, modifier = Modifier.fillMaxWidth()) }
             if (updateText.isNotEmpty()) Text(updateText, style = MaterialTheme.typography.bodySmall)
             if (installMsg.isNotEmpty()) Text(installMsg, style = MaterialTheme.typography.bodySmall)
+            AutoUpdateSettings()
             OutlinedButton(
                 enabled = pairing != null && !busy,
                 onClick = {
@@ -215,6 +221,22 @@ class DevLinkClient(private val app: Context, private val pairing: PairingInfo) 
         }
     }
 
+    /** Asks the PC for its newest APK and decides whether to offer it (the automatic check). Throws [PcLinkException] when the PC cannot be reached. */
+    suspend fun fetchOffer(dismissedCommit: String?): AutoUpdate.Offer = withContext(Dispatchers.IO) {
+        val enc = URLEncoder.encode(app.packageName, "UTF-8")
+        val info = ProcJson.json.decodeFromString<ApkInfo>(link.getText("/v1/dev/apk?package=$enc"))
+        AutoUpdate.offer(BuildConfig.GIT_COMMIT, installedVersionCode(), installedUpdatedMs(), info, dismissedCommit)
+    }
+
+    /** Downloads [info]'s APK into cacheDir/dev-update and checks size and sha256; null when the check fails. */
+    suspend fun downloadVerified(info: ApkInfo, onProgress: (Float) -> Unit): File? = withContext(Dispatchers.IO) {
+        val dir = File(app.cacheDir, "dev-update").apply { mkdirs() }
+        dir.listFiles()?.forEach { it.delete() }
+        val dest = File(dir, "update.apk")
+        link.downloadTo(info.url, dest, onProgress)
+        if (Sha256.verify(dest, info.sha256, info.size)) dest else { dest.delete(); null }
+    }
+
     /** Logcat of this process plus the diagnostics report, as two uploads. Returns the line with both ids. */
     suspend fun sendLogsAndDiagnostics(): String = withContext(Dispatchers.IO) {
         val logsId = upload("logs", (header() + "\n" + logcat()).toByteArray(Charsets.UTF_8).let { trimTail(it) })
@@ -272,6 +294,9 @@ class DevLinkClient(private val app: Context, private val pairing: PairingInfo) 
             "logcat unavailable: ${e.message}"
         }
     }
+
+    private fun installedUpdatedMs(): Long =
+        try { app.packageManager.getPackageInfo(app.packageName, 0).lastUpdateTime } catch (e: Exception) { 0L }
 
     private fun installedVersionCode(): Int =
         try {

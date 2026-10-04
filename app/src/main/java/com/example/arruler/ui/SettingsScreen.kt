@@ -147,6 +147,10 @@ fun SettingsScreen(
                 Section("Dev (debug build)") { com.example.arruler.devlink.DevEntries.entry.SettingsSection(pairing) }
             }
 
+            if (com.example.arruler.beam.BeamEntries.entry.enabled) {
+                Section("Beam to PC (debug build)") { com.example.arruler.beam.BeamEntries.entry.SettingsSection(pairing) }
+            }
+
             Section("PC") {
                 if (pairing == null) {
                     Text("No PC paired. Start the PC server, then scan the QR code it shows.", style = MaterialTheme.typography.bodyMedium)

@@ -155,3 +155,71 @@ class UrlKindAndCrashTest {
         assertNull(s.pending())
     }
 }
+
+class AutoUpdateTest {
+    private fun info(commit: String = "def5678", code: Int = 1, mtime: Long = 0, size: Long = 67L * 1024 * 1024) =
+        ApkInfo(code, "1.0.0", commit, size, "ff", "/v1/dev/apk/ARMeasure-debug-$commit.apk", mtime)
+
+    @Test fun differentCommitOffersTheBanner() {
+        val o = AutoUpdate.offer("abc1234", 1, 0, info(), null)
+        assertTrue(o is AutoUpdate.Offer.Show)
+        assertEquals("Update available (abc1234 \u2192 def5678) \u00B7 Install", AutoUpdate.bannerText("abc1234", "def5678"))
+    }
+
+    @Test fun sameCommitOffersNothing() {
+        assertEquals(AutoUpdate.Offer.None("up to date"), AutoUpdate.offer("def5678", 1, 0, info(), null))
+    }
+
+    @Test fun longCommitIsShortenedToSeven() {
+        assertEquals("Update available (abc1234 \u2192 def5678) \u00B7 Install", AutoUpdate.bannerText("abc1234ffff", "def5678aaaa"))
+    }
+
+    @Test fun anOlderFileIsNotOfferedButUnknownTimeIs() {
+        val installedAt = 2_000_000_000_000L
+        assertTrue(AutoUpdate.offer("abc1234", 1, installedAt, info(mtime = 1_900_000_000), null) is AutoUpdate.Offer.None) // seconds, older
+        assertTrue(AutoUpdate.offer("abc1234", 1, installedAt, info(mtime = 2_100_000_000), null) is AutoUpdate.Offer.Show) // seconds, newer
+        assertTrue(AutoUpdate.offer("abc1234", 1, installedAt, info(mtime = 2_100_000_000_000L), null) is AutoUpdate.Offer.Show) // ms, newer
+        assertTrue(AutoUpdate.offer("abc1234", 1, installedAt, info(mtime = 0), null) is AutoUpdate.Offer.Show) // server sends no time
+        assertTrue(AutoUpdate.offer("abc1234", 1, 0, info(mtime = 1), null) is AutoUpdate.Offer.Show) // install time unknown
+    }
+
+    @Test fun aDismissedCommitStaysQuietUntilTheNextOne() {
+        assertEquals(AutoUpdate.Offer.None("dismissed"), AutoUpdate.offer("abc1234", 1, 0, info(), "def5678"))
+        assertTrue(AutoUpdate.offer("abc1234", 1, 0, info(commit = "9999999"), "def5678") is AutoUpdate.Offer.Show)
+    }
+
+    @Test fun unusableAnswersOfferNothing() {
+        assertTrue(AutoUpdate.offer("abc1234", 1, 0, info().copy(sha256 = ""), null) is AutoUpdate.Offer.None)
+        assertTrue(AutoUpdate.offer("abc1234", 1, 0, info().copy(url = "/etc/passwd"), null) is AutoUpdate.Offer.None)
+        assertTrue(AutoUpdate.offer("abc1234", 1, 0, info(commit = ""), null) is AutoUpdate.Offer.None)
+    }
+
+    @Test fun throttleIsThirtyMinutes() {
+        val t0 = 1_000_000_000L
+        assertTrue(AutoUpdate.shouldCheck(t0, 0))
+        assertFalse(AutoUpdate.shouldCheck(t0 + 29 * 60_000L, t0))
+        assertTrue(AutoUpdate.shouldCheck(t0 + 30 * 60_000L, t0))
+        assertTrue(AutoUpdate.shouldCheck(t0 - 1, t0)) // clock went back
+    }
+
+    @Test fun sizePromptNamesTheMegabytes() {
+        assertEquals("67 MB", AutoUpdate.sizeText(67L * 1024 * 1024))
+        assertEquals("1 MB", AutoUpdate.sizeText(10))
+        assertEquals("Download 67 MB on mobile data?", AutoUpdate.mobilePrompt(67L * 1024 * 1024))
+    }
+
+    @Test fun downloadGate() {
+        val size = 67L * 1024 * 1024
+        assertEquals(AutoUpdate.Gate.Go, AutoUpdate.downloadGate(false, false, size))
+        assertEquals(AutoUpdate.Gate.AskMobile("Download 67 MB on mobile data?"), AutoUpdate.downloadGate(true, false, size))
+        assertEquals(AutoUpdate.Gate.Go, AutoUpdate.downloadGate(true, true, size))
+        assertEquals(AutoUpdate.Gate.NoNetwork, AutoUpdate.downloadGate(null, true, size))
+    }
+
+    @Test fun apkInfoParsesWithAndWithoutMtime() {
+        val a = ProcJson.json.decodeFromString<ApkInfo>("""{"versionCode":1,"commit":"abc1234","size":5,"sha256":"ff","url":"/v1/dev/apk/x.apk"}""")
+        assertEquals(0L, a.mtime)
+        val b = ProcJson.json.decodeFromString<ApkInfo>("""{"versionCode":1,"commit":"abc1234","size":5,"sha256":"ff","url":"/v1/dev/apk/x.apk","mtime":1790000000}""")
+        assertEquals(1790000000L, b.mtime)
+    }
+}

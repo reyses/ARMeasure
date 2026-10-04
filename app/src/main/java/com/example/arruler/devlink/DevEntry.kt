@@ -29,6 +29,10 @@ interface DevEntry {
     /** Debug and paired: uploads [text] to the PC as a crash report and returns the line to show; otherwise null (share it instead). */
     suspend fun sendReport(context: Context, pairing: PairingInfo?, text: String): String?
 
+    /** The non-blocking "Update available" banner, drawn over the whole screen (debug only; draws nothing when there is no update). */
+    @Composable
+    fun UpdateBanner()
+
     /** The body of Settings > Dev (debug only). */
     @Composable
     fun SettingsSection(pairing: PairingInfo?)

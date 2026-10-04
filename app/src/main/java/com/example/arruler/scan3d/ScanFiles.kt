@@ -98,6 +98,7 @@ object ScanFiles {
         writeAtomic(File(d, PLY_NAME), plyBytes(s))
         s.mesh?.let { writeAtomic(File(d, MESH_NAME), it.toBinaryPly()) }
         writeAtomic(File(d, JSON_NAME), json.encodeToString(ScanMetaDto.serializer(), meta(s)).toByteArray(Charsets.UTF_8))
+        for (name in listOf(PLY_NAME, MESH_NAME, JSON_NAME)) File(d, name).takeIf { it.isFile }?.let { com.example.arruler.beam.Beam.attach("export", it) }
         return d
     }
 
