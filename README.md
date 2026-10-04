@@ -16,6 +16,7 @@ A production-ready AR ruler application optimized for Android flagship devices, 
 - Object, capture video: the AR session is recorded to one MP4 per capture (the whole walk and spin of a Hybrid is one file), kept with the saved object and played from its detail page
 - Downloads export: every save also copies to Download/ARMeasure/<project>: the mesh as OBJ (+ MTL + texture PNG when textured) and PLY (+ a vertex-colour PLY), measurements.json / .txt (with the shape line), and the capture video
 - PC processing: pair your PC with a QR code (Settings), then big scans and fine object meshes run on the PC (Auto, Phone or PC in Settings)
+- Diagnostics (Settings -> Diagnostics): the phone checks its own GPU kernels against the CPU, lists its cameras (ToF, lens baseline, concurrent cameras), ARCore and device info, and shares the report as text; GPU kernels are used only where they verified on that phone (docs/GPU.md)
 - Projects: save rooms into projects, view the floor plan, export it
 - Recording and playback of AR sessions (MP4 datasets)
 

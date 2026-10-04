@@ -5,6 +5,7 @@ sealed interface Screen {
     data object Measure : Screen
     data object Projects : Screen
     data object Settings : Screen
+    data object Diagnostics : Screen
 
     /** Every saved object of every project, as a gallery. */
     data object Objects : Screen

@@ -128,7 +128,7 @@ class AndroidSpinCapture(private val root: File) : SpinCapture {
             val intr = Intrinsics(ik.focalLength[0], ik.focalLength[1], ik.principalPoint[0], ik.principalPoint[1], dims[0], dims[1]).scaledTo(w, h)
             val py = image.planes[0]
             val yBytes = ByteArray(py.buffer.remaining()).also { py.buffer.get(it) }
-            val sharp = Sharpness.laplacianVariance(yBytes, w, h, py.rowStride, py.pixelStride)
+            val sharp = com.example.arruler.gpu.GpuGate.sharpness(yBytes, w, h, py.rowStride, py.pixelStride)
             val verdict = s.onImage(true, pose, intr, yBytes, py.rowStride, py.pixelStride, sharp)
             publish()
             if (verdict != SpinVerdict.KEEP) return

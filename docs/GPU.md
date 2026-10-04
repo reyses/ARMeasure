@@ -1,6 +1,6 @@
 # GPU compute (package `com.example.arruler.gpu`)
 
-Status 2026-10-03: code and JVM tests are done and green. The GLSL kernels and the instrumented tests have NOT been executed
+Status 2026-10-03: code and JVM tests are done and green; the phone verifies itself with Settings -> Diagnostics (see "In-app self-test and the per-device gate"). The GLSL kernels and the instrumented tests have NOT been executed
 anywhere yet: the PC has no hypervisor driver (`emulator -accel-check` -> "Android Emulator hypervisor driver is not
 installed", exit 6; `-accel off` exits at once for the x86_64 image), so no emulator could boot. They run on the first phone
 (see "Running the instrumented tests").
@@ -109,3 +109,47 @@ GPU says nothing about Mali: the in-app `GpuBench` on the phones is the real mea
 on a phone (USB debugging) or on an emulator with hardware acceleration (WHPX/AEHD, then `-gpu host`). Tests skip themselves
 (JUnit assumption) when the GL context has no ES 3.1 compute. Look for the `GPUTEST` lines in logcat for GL_VERSION,
 GL_RENDERER and the timings.
+
+## In-app self-test and the per-device gate (2026-10-03)
+
+The GPU code has not run on a GPU in development, so the phone verifies itself: Settings -> Diagnostics -> "Run GPU self-test"
+(`diag/GpuSelfTest`, about 10-30 s on a worker thread with progress). It runs the same equivalence checks as the instrumented
+test on the same fixtures (`gpu/GpuFixtures`, shared with androidTest; slightly smaller sizes to fit the time budget) for all six
+kernels, each in its own try with a GL error check before and after. A driver exception, a GL error, a CPU fallback
+(`usedGpu == false`) or an error above the tolerance below is a FAIL for that kernel, never an app crash; after a 20 s GL timeout
+the remaining kernels are skipped as FAIL. The result per kernel is PASS/FAIL with the measured max error vs tolerance, CPU ms,
+GPU ms and speed-up, plus `GpuBench`.
+
+| Kernel | Error measured | Tolerance |
+|---|---|---|
+| DENOISE | max per-point difference, mm | 0.1 mm |
+| TEXTURE_BAKE | worst channel difference, levels (a filled/unfilled mismatch = fail) | 2 levels |
+| RANSAC | max abs difference of the 4 plane parameters, 4 seeds | 0 (identical) |
+| YUV_CONVERT | worst channel difference, levels | 1 level |
+| SHARPNESS | relative difference of the variance | 1e-4 |
+| ROI_SIGNATURE | max difference, luma levels | 1e-3 |
+
+### The gate (`gpu/GpuGate`)
+
+The outcome is stored (SharedPreferences `gpu_gate`) as a `GpuVerification`: key = `Build.FINGERPRINT | v<versionCode> | GL_RENDERER | GL_VERSION`,
+the set of PASSED kernels, and a `KernelCost` per kernel built from the measured CPU/GPU times (GPU fixed cost from the bench).
+A kernel runs on the GPU only when ALL hold:
+1. the Settings switch "Use GPU when verified" is on (default on);
+2. a record exists whose fingerprint and app versionCode match this build (checked without GL) and whose GL_RENDERER/GL_VERSION match the lazily created context (checked on first use; a driver update therefore closes the gate);
+3. that kernel PASSED on that record;
+4. `GpuProfile.useGpu(kernel, size)` is true for the job size (`gpuFixedMs + size x gpuNs < 0.8 x size x cpuNs`, measured costs);
+5. the caller is not on the main thread (a GL call there is refused, so the CPU runs).
+Otherwise the CPU path runs unchanged. Before any self-test the default is CPU. Settings shows "GPU: verified n/6 kernels on <renderer>" or
+"GPU: not verified - run Diagnostics".
+
+Wired call sites (all through `GpuGate`, closed gate = the original code): `objscan/ObjectIsolation` denoise (`GpuGate.denoise`),
+`texture/TextureBaker` stage 4 (`GpuGate.textureSample`; null = the original loop), `depth/PlaneExtractor` (constructor parameters `gpu`, `gpuPolicy`;
+the three production call sites pass `GpuGate.ransacContext()` / `GpuGate.profile()`), keyframe sharpness (`KeyframeCapture`, `AndroidSpinCapture`) and the spin ROI
+signature (`SpinSession`). `GpuGate.nv21ToArgb` exists but no app code decodes NV21 to ARGB today (the NV21 in `YuvConvert.toNv21` is for JPEG), so it has no call site.
+`GpuContext` of the gate is separate from the self-test's and from Filament's.
+
+Diagnostics also reports (`diag/DeviceReport`): device/SoC/build, ARCore apk, depth modes, the camera configs ARCore offers and the one `CameraConfigChooser` picks,
+every Camera2 id including physical lenses (focal length, sensor size, hFOV, minimum focus in cm, lens pose, capabilities, DEPTH16 / DEPTH_POINT_CLOUD streams),
+"Depth sensor (ToF): yes/no", concurrent camera ids (API 30+), the main<->ultrawide baseline in mm from LENS_POSE_TRANSLATION, GL strings and compute limits,
+Vulkan level, thermal status, tier and benchmark. "Share report" saves `Download/ARMeasure/diagnostics/<model> <date>.txt` and opens a text/plain share; "Copy to clipboard" copies the same text.
+The AR view is held paused while the screen is open and the survey uses a short-lived ARCore Session that is paused and closed.

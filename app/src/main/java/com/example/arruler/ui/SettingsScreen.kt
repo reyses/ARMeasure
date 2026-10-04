@@ -83,6 +83,11 @@ fun SettingsScreen(
     onCopyToDownloads: (Boolean) -> Unit,
     recordVideo: Boolean,
     onRecordVideo: (Boolean) -> Unit,
+    useGpu: Boolean,
+    onUseGpu: (Boolean) -> Unit,
+    /** One line: GPU: verified n/6 kernels on <renderer>, or not verified. */
+    gpuStatus: String,
+    onDiagnostics: () -> Unit,
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -130,6 +135,9 @@ fun SettingsScreen(
 
             Section("This phone") {
                 Text(deviceLine(profile), style = MaterialTheme.typography.bodyMedium)
+                SwitchRow("Use GPU when verified", "Only kernels that matched the CPU result on this phone, driver and app version are used, and only for jobs where they are faster.", useGpu, onUseGpu)
+                Text(gpuStatus, style = MaterialTheme.typography.bodyMedium)
+                OutlinedButton(onClick = onDiagnostics) { Text("Diagnostics") }
                 OutlinedButton(onClick = onSpeedTest, enabled = !speedTesting) {
                     Text(if (speedTesting) "Measuring (about 2 s)..." else "Run speed test")
                 }

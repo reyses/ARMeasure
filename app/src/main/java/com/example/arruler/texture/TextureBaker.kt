@@ -387,7 +387,15 @@ object TextureBaker {
         // 4. rasterise the atlas
         val atlas = IntArray(side * side)
         val filled = BooleanArray(side * side)
-        for (t in 0 until nT) {
+        // verified-GPU texel sampling (GpuGate: null = gate closed or the GPU declined, then the loop below runs unchanged)
+        val gpuAtlas = com.example.arruler.gpu.GpuGate.textureSample(
+            com.example.arruler.gpu.TexelPlan(side, pad, scale, triUV, bestView, chartOf, cMinU, cMinV, rx, ry), keyframes,
+        )
+        if (gpuAtlas != null) {
+            gpuAtlas.copyInto(atlas)
+            for (i in atlas.indices) filled[i] = atlas[i] != 0
+        }
+        for (t in 0 until (if (gpuAtlas != null) 0 else nT)) {
             val c = chartOf[t]; if (c < 0) continue
             val kf = keyframes[bestView[t]]
             val ox = rx[c] + pad; val oy = ry[c] + pad

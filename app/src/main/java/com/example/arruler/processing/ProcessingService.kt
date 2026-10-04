@@ -103,7 +103,7 @@ class DefaultPhoneRunner : PhoneRunner {
         when (job.type) {
             JobType.SCAN_ANALYZE -> {
                 val cloud = requireNotNull(job.cloud) { "no cloud" }
-                val planes = PlaneExtractor().extract(cloud.xyz)
+                val planes = PlaneExtractor(gpu = com.example.arruler.gpu.GpuGate.ransacContext(), gpuPolicy = com.example.arruler.gpu.GpuGate.profile()).extract(cloud.xyz)
                 val room = RoomFromPlanes.build(planes)
                     ?: throw IllegalStateException("Room not found: need floor, ceiling and 3 walls in the scan")
                 val area = room.outline.area().toDouble()

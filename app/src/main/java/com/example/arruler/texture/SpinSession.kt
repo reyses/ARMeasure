@@ -48,7 +48,7 @@ class SpinSession(
         }
         phoneMoved = p.phoneMoved(pose)
         if (phoneMoved) return null
-        val v = p.decide(true, p.roi.signature(y, rowStride, pixelStride), sharpness)
+        val v = p.decide(true, com.example.arruler.gpu.GpuGate.roiSignature(p.roi, y, rowStride, pixelStride), sharpness)
         if (v == SpinVerdict.KEEP) {
             keptInTurn++; totalKept++
             if (keptInTurn >= config.maxPerTurn) finishTurn()

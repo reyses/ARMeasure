@@ -226,7 +226,7 @@ class ObjectIsolation(
             m = filter(keep, m) { box.contains(points[it * 3], points[it * 3 + 1], points[it * 3 + 2], denoiseRadius) }
             val sub = FloatArray(m * 3)
             for (q in 0 until m) { val i = keep[q]; sub[q * 3] = points[i * 3]; sub[q * 3 + 1] = points[i * 3 + 1]; sub[q * 3 + 2] = points[i * 3 + 2] }
-            val sm = ObjectDenoise.smooth(sub, denoiseRadius, denoiseIterations)
+            val sm = com.example.arruler.gpu.GpuGate.denoise(sub, denoiseRadius, denoiseIterations)
             for (q in 0 until m) { val i = keep[q]; points[i * 3] = sm[q * 3]; points[i * 3 + 1] = sm[q * 3 + 1]; points[i * 3 + 2] = sm[q * 3 + 2] }
         }
         m = filter(keep, m) { box.contains(points[it * 3], points[it * 3 + 1], points[it * 3 + 2]) }

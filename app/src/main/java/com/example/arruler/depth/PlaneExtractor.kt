@@ -53,7 +53,10 @@ class PlaneExtractor(
     private val ransacSample: Int = 4000,
     private val clusterCell: Float = 0.15f,
     private val heightBand: Float = 0.3f,
-    private val random: Random = Random(1)
+    private val random: Random = Random(1),
+    /** GL context for the RANSAC hypothesis scoring (null = CPU); obtain it from GpuGate.ransacContext() so the gate decides. */
+    private val gpu: com.example.arruler.gpu.GpuContext? = null,
+    private val gpuPolicy: com.example.arruler.gpu.GpuProfile? = null,
 ) {
 
     fun extract(points: FloatArray): List<ExtractedPlane> {
@@ -87,6 +90,7 @@ class PlaneExtractor(
     // ---- RANSAC ----
 
     private fun ransac(p: FloatArray, idx: IntArray, n: Int): DoubleArray? {
+        if (gpu != null) return com.example.arruler.gpu.GpuRansac.bestPlane(gpu, p, idx, n, iterations, ransacSample, inlierThreshold, minInliers, random, gpuPolicy).value
         val sub: IntArray = if (n <= ransacSample) IntArray(n) { idx[it] }
         else IntArray(ransacSample) { idx[random.nextInt(n)] }
         var bestCount = 0

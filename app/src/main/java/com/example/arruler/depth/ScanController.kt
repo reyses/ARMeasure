@@ -70,7 +70,7 @@ object ScanLogic {
     }
 
     fun analyze(points: FloatArray): ScanAnalysis {
-        val planes = PlaneExtractor().extract(points)
+        val planes = PlaneExtractor(gpu = com.example.arruler.gpu.GpuGate.ransacContext(), gpuPolicy = com.example.arruler.gpu.GpuGate.profile()).extract(points)
         RoomFromPlanes.build(planes)?.let { return ScanAnalysis.Room(it) }
         val missing = missingPieces(planes)
         return ScanAnalysis.Incomplete(
@@ -166,7 +166,7 @@ class ScanController(private val scope: CoroutineScope) {
         withContext(Dispatchers.Default) {
             lock.withLock {
                 if (cloud.count == 0) return@withLock null
-                val planes = PlaneExtractor().extract(cloud.points(ScanLogic.ANALYZE_MIN_HITS))
+                val planes = PlaneExtractor(gpu = com.example.arruler.gpu.GpuGate.ransacContext(), gpuPolicy = com.example.arruler.gpu.GpuGate.profile()).extract(cloud.points(ScanLogic.ANALYZE_MIN_HITS))
                 ScanSnapshot.from(cloud, planes, RoomFromPlanes.build(planes), id, projectId)
             }
         }

@@ -318,6 +318,7 @@ class MainActivity : AppCompatActivity() {
 
         repo = ProjectRepository(File(filesDir, "projects"))
         settings = AppSettings(this)
+        com.example.arruler.gpu.GpuGate.init(this, settings.useGpu.value)
         lastUsedProjectId = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_LAST_PROJECT, null)
 
         ar = ArSessionController(this)
@@ -396,13 +397,15 @@ class MainActivity : AppCompatActivity() {
             val canEndTurn by spinCapture.canEndTurn.collectAsState()
             val copyToDownloads by settings.copyToDownloads.collectAsState()
             val recordVideo by settings.recordCaptureVideo.collectAsState()
+            val useGpu by settings.useGpu.collectAsState()
+            val gpuRecord by com.example.arruler.gpu.GpuGate.verification.collectAsState()
             ArRulerTheme {
                 Box(Modifier.fillMaxSize().background(Color.Black)) {
                     // The AR view stays composed under the other screens so the ARCore session,
                     // anchors and the shared plan frame survive a visit to Projects/Plan. Under the 3D
                     // viewer it is held paused (same composition, session paused, no drawing) so the two
                     // GL surfaces never render together and the anchors still survive.
-                    ArSceneHost(ar, renderer, Modifier.fillMaxSize(), paused = screen is Screen.Scan3D || screen is Screen.ObjectDetail || arPaused)
+                    ArSceneHost(ar, renderer, Modifier.fillMaxSize(), paused = screen is Screen.Scan3D || screen is Screen.ObjectDetail || screen == Screen.Diagnostics || arPaused)
                     if (screen == Screen.Measure && showDepth) DepthConfidenceOverlay(depthHeat)
                     if (screen == Screen.Measure && appMode == AppMode.OBJECT &&
                         (objState.phase == ObjectPhase.IDLE || objState.phase == ObjectPhase.PLACED)
@@ -516,8 +519,14 @@ class MainActivity : AppCompatActivity() {
                                 onUnpair = hub::unpair, onTest = hub::testConnection,
                                 copyToDownloads = copyToDownloads, onCopyToDownloads = settings::setCopyToDownloads,
                                 recordVideo = recordVideo, onRecordVideo = settings::setRecordCaptureVideo,
+                                useGpu = useGpu, onUseGpu = settings::setUseGpu,
+                                gpuStatus = com.example.arruler.gpu.GpuGate.statusLine(useGpu, gpuRecord),
+                                onDiagnostics = { screen = Screen.Diagnostics },
                                 onBack = { screen = Screen.Projects },
                             )
+                        }
+                        Screen.Diagnostics -> Surface(Modifier.fillMaxSize()) {
+                            com.example.arruler.ui.DiagnosticsScreen(onBack = { screen = Screen.Settings })
                         }
                         is Screen.Plan -> Surface(Modifier.fillMaxSize()) {
                             val project = projects.firstOrNull { it.id == s.projectId }
@@ -633,6 +642,7 @@ class MainActivity : AppCompatActivity() {
                     screen = when (screen) {
                         is Screen.Plan -> Screen.Projects
                         Screen.Settings -> Screen.Projects
+                        Screen.Diagnostics -> Screen.Settings
                         is Screen.Scan3D -> scan3dReturnTo
                         Screen.Objects -> Screen.Projects
                         is Screen.ObjectDetail -> objectReturnTo

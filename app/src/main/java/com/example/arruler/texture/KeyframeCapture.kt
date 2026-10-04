@@ -71,7 +71,7 @@ class KeyframeCapture(
             val w = image.width; val h = image.height
             val py = image.planes[0]
             val yBytes = ByteArray(py.buffer.remaining()).also { py.buffer.get(it) }
-            val sharp = Sharpness.laplacianVariance(yBytes, w, h, py.rowStride, py.pixelStride)
+            val sharp = com.example.arruler.gpu.GpuGate.sharpness(yBytes, w, h, py.rowStride, py.pixelStride)
             val scaled = intr.scaledTo(w, h)
             val verdict = policy.decide(true, pose, scaled, boxCentre, sharp)
             count(verdict)
