@@ -2,13 +2,15 @@
 <!--
   Applied from AndroidManifest.xml (<application android:networkSecurityConfig>).
 
-  Why cleartext is permitted at platform level: the PC link supports plain http on the LAN (a self-signed
+  Why cleartext is permitted at platform level: the PC link supports plain http on the LAN and the tailnet (a self-signed
   https certificate is not trusted), and Android's network security config cannot express IP ranges
-  (a domain-config only matches a host name or one exact IP literal, never 192.168.0.0/16). Without
+  (a domain-config only matches a host name or one exact IP literal, never 192.168.0.0/16 or 100.64.0.0/10). Without
   cleartext here, targetSdk 37 would block every http request, i.e. the whole LAN mode.
 
   The real rule is enforced in code, not here: processing/PcLink.kt (UrlPolicy + an OkHttp interceptor)
-  allows https anywhere and plain http ONLY to IPv4 literals in 10/8, 172.16/12 and 192.168/16, refuses
+  allows https anywhere and plain http ONLY to private or Tailscale addresses: IPv4 literals in 10/8, 172.16/12,
+  192.168/16 and the Tailscale CGNAT range 100.64/10, IPv6 literals in the Tailscale ULA fd7a:115c:a1e0::/48,
+  bare single-label host names (MagicDNS short names such as "rxmoi") and *.ts.net names; it refuses
   everything else and does not follow redirects. HttpPcLink (OkHttp) is the only plain-http client in the
   app; ARCore, SceneView and the Google code scanner use https only. So the platform flag is deliberately
   loose and UrlPolicy is the enforcement.

@@ -25,9 +25,22 @@ import kotlin.coroutines.resumeWithException
 
 // ---------------------------------------------------------------- pure: pairing and URL policy
 
-/** Contents of the pairing QR shown by the PC server: {"v":1,"url":...,"token":...,"name":...}. */
+/**
+ * Contents of the pairing QR shown by the PC server: {"v":1,"url":...,"token":...,"name":...} and optionally
+ * "urls": [tailnet, lan, tunnel] in preference order. Older QR codes carry only "url"; newer ones may carry only
+ * "urls" (then [url] becomes the first entry).
+ */
 @Serializable
-data class PairingInfo(val v: Int, val url: String, val token: String, val name: String = "") {
+data class PairingInfo(
+    val v: Int,
+    val url: String = "",
+    val token: String,
+    val name: String = "",
+    val urls: List<String> = emptyList(),
+) {
+    /** Every candidate base URL in the order to try them: [urls] first, then [url] when it is not already listed. */
+    fun allUrls(): List<String> = (urls + url).map { it.trim().trimEnd('/') }.filter { it.isNotEmpty() }.distinct()
+
     companion object {
         const val MIN_TOKEN = 32
 
@@ -40,27 +53,68 @@ data class PairingInfo(val v: Int, val url: String, val token: String, val name:
             }
             require(p.v == 1) { "Unsupported pairing version ${p.v}" }
             require(p.token.length >= MIN_TOKEN) { "Token is too short" }
-            require(UrlPolicy.isAllowed(p.url)) { "URL must be https, or http to a private LAN address" }
-            p.copy(url = p.url.trim().trimEnd('/'))
+            val all = p.allUrls()
+            require(all.isNotEmpty()) { "Pairing code has no URL" }
+            for (u in all) require(UrlPolicy.isAllowed(u)) { "URL must be https, or http to a private LAN or Tailscale address" }
+            p.copy(url = all.first(), urls = if (p.urls.isEmpty()) emptyList() else all)
         }
     }
 }
 
-/** HTTPS always; plain http only to an IPv4 literal in 10/8, 172.16/12 or 192.168/16. */
+/**
+ * HTTPS always; plain http only to a private or Tailscale address: IPv4 literals in 10/8, 172.16/12, 192.168/16
+ * or the Tailscale CGNAT range 100.64/10, IPv6 literals in the Tailscale ULA fd7a:115c:a1e0::/48, a bare
+ * single-label host name (a MagicDNS short name such as "rxmoi") or a name under .ts.net.
+ */
 object UrlPolicy {
     fun isAllowed(url: String): Boolean {
         val u = try { url.trim().toHttpUrl() } catch (e: Exception) { return false }
         if (u.isHttps) return true
-        return isPrivateLanIp(u.host)
+        val h = u.host
+        return isPrivateLanIp(h) || isTailscaleIpv4(h) || isTailscaleIpv6(h) || isTailnetName(h)
+    }
+
+    private fun ipv4(host: String): List<Int>? {
+        val parts = host.split('.')
+        if (parts.size != 4) return null
+        val n = parts.map { s -> if (s.isNotEmpty() && s.length <= 3 && s.all { it.isDigit() }) s.toInt() else return null }
+        return if (n.any { it > 255 }) null else n
     }
 
     fun isPrivateLanIp(host: String): Boolean {
-        val parts = host.split('.')
-        if (parts.size != 4) return false
-        val n = parts.map { s -> if (s.isNotEmpty() && s.length <= 3 && s.all { it.isDigit() }) s.toInt() else return false }
-        if (n.any { it > 255 }) return false
+        val n = ipv4(host) ?: return false
         return n[0] == 10 || (n[0] == 172 && n[1] in 16..31) || (n[0] == 192 && n[1] == 168)
     }
+
+    /** 100.64.0.0/10 = 100.64.0.0 to 100.127.255.255. */
+    fun isTailscaleIpv4(host: String): Boolean {
+        val n = ipv4(host) ?: return false
+        return n[0] == 100 && n[1] in 64..127
+    }
+
+    /** fd7a:115c:a1e0::/48: the first three 16-bit groups of the (OkHttp-canonical, unbracketed) literal. */
+    fun isTailscaleIpv6(host: String): Boolean {
+        if (!host.contains(':') || !host.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' || it == ':' }) return false
+        val b = try { java.net.InetAddress.getByName(host).address } catch (e: Exception) { return false }
+        if (b.size != 16) return false
+        val want = intArrayOf(0xfd, 0x7a, 0x11, 0x5c, 0xa1, 0xe0)
+        return want.indices.all { (b[it].toInt() and 0xff) == want[it] }
+    }
+
+    /** A bare single-label name (letters, digits, hyphen, at least one letter) or "<something>.ts.net". */
+    fun isTailnetName(host: String): Boolean {
+        val h = host.lowercase()
+        if (h.endsWith(".ts.net")) return h.length > ".ts.net".length && h.split('.').all { it.isNotEmpty() }
+        if (h.contains('.') || h.contains(':')) return false
+        if (h == "localhost") return false
+        return h.isNotEmpty() && h.all { it.isDigit() || it in 'a'..'z' || it == '-' } && h.any { it in 'a'..'z' } && !h.startsWith('-')
+    }
+}
+
+/** The order [HttpPcLink] tries the pairing URLs in: the one that worked last first, the rest as listed. */
+object UrlOrder {
+    fun order(urls: List<String>, lastGood: String?): List<String> =
+        if (lastGood != null && lastGood in urls) listOf(lastGood) + urls.filter { it != lastGood } else urls
 }
 
 // ---------------------------------------------------------------- API types
@@ -150,7 +204,8 @@ class AndroidPairingStore(
             clear()
             return null
         }
-        return PairingInfo(1, url, token, prefs.getString("name", "") ?: "")
+        val urls = prefs.getString("urls", null)?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
+        return PairingInfo(1, url, token, prefs.getString("name", "") ?: "", urls)
     }
 
     override fun save(info: PairingInfo) {
@@ -159,7 +214,8 @@ class AndroidPairingStore(
         } catch (e: Exception) {
             throw IllegalStateException("Secure storage (Android Keystore) is unavailable: ${e.message}", e)
         }
-        prefs.edit().putString("url", info.url).putString("token_enc", framed).putString("name", info.name).apply()
+        prefs.edit().putString("url", info.url).putString("token_enc", framed).putString("name", info.name)
+            .putString("urls", info.urls.joinToString("\n")).apply()
     }
 
     override fun clear() { prefs.edit().clear().apply() }
@@ -171,7 +227,11 @@ class HttpPcLink(
     private val pairing: PairingInfo,
     client: OkHttpClient? = null
 ) : PcLink {
-    private val base = pairing.url.trimEnd('/')
+    private val bases: List<String> = pairing.allUrls().ifEmpty { listOf(pairing.url.trimEnd('/')) }
+    private val memoryKey = bases.joinToString("|")
+
+    /** The URL that answered last (this process); null until a call succeeded. */
+    val activeUrl: String? get() = lastGood[memoryKey]
 
     private val http: OkHttpClient = (client ?: OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -188,7 +248,7 @@ class HttpPcLink(
         .build()
 
     override suspend fun ping(): ServerInfo =
-        ProcJson.json.decodeFromString(execute(Request.Builder().url("$base/v1/ping").get().build()).use { bodyText(it) })
+        ProcJson.json.decodeFromString(execute { Request.Builder().url("$it/v1/ping").get().build() }.use { bodyText(it) })
 
     override suspend fun submit(zip: File, type: JobType, onProgress: (Float) -> Unit): String {
         val file = ProgressBody(zip, "application/zip".toMediaType(), onProgress)
@@ -196,17 +256,21 @@ class HttpPcLink(
             .addFormDataPart("type", type.wire)
             .addFormDataPart("file", zip.name, file)
             .build()
-        val resp = execute(Request.Builder().url("$base/v1/jobs").post(body).build())
+        val resp = execute { Request.Builder().url("$it/v1/jobs").post(body).build() }
         return resp.use { ProcJson.json.decodeFromString<SubmitDto>(bodyText(it)).id }
     }
 
     override suspend fun status(jobId: String): JobStatus {
-        val r = execute(Request.Builder().url("$base/v1/jobs/${enc(jobId)}").get().build())
+        val r = execute { Request.Builder().url("$it/v1/jobs/${enc(jobId)}").get().build() }
         return r.use { ProcJson.json.decodeFromString<StatusDto>(bodyText(it)).toStatus() }
     }
 
     override suspend fun download(jobId: String, dest: File, onProgress: (Float) -> Unit): File {
-        val resp = execute(Request.Builder().url("$base/v1/jobs/${enc(jobId)}/result").get().build())
+        val resp = execute { Request.Builder().url("$it/v1/jobs/${enc(jobId)}/result").get().build() }
+        return writeBody(resp, dest, onProgress)
+    }
+
+    private fun writeBody(resp: Response, dest: File, onProgress: (Float) -> Unit): File {
         val part = File(dest.path + ".part")
         resp.use { r ->
             val body = r.body
@@ -231,24 +295,57 @@ class HttpPcLink(
     }
 
     override suspend fun cancel(jobId: String) {
-        execute(Request.Builder().url("$base/v1/jobs/${enc(jobId)}").delete().build()).close()
+        execute { Request.Builder().url("$it/v1/jobs/${enc(jobId)}").delete().build() }.close()
     }
 
     private fun enc(id: String) = java.net.URLEncoder.encode(id, "UTF-8")
 
     private fun bodyText(r: Response): String = r.body.string()
 
-    /** Runs the call; non-2xx becomes a [PcLinkException] carrying the server's error code. */
-    private suspend fun execute(req: Request): Response {
-        val resp = try {
-            await(http.newCall(req))
-        } catch (e: IOException) {
-            throw PcLinkException(0, "network", e.message ?: "network error", network = true)
+    /** Generic authenticated GET returning the body text (used by the debug Dev link). */
+    suspend fun getText(path: String): String = execute { Request.Builder().url("$it$path").get().build() }.use { bodyText(it) }
+
+    /** Generic authenticated multipart POST returning the body text (used by the debug Dev link). */
+    suspend fun postMultipart(path: String, body: RequestBody): String =
+        execute { Request.Builder().url("$it$path").post(body).build() }.use { bodyText(it) }
+
+    /** Streams GET [path] into [dest] (via .part), reporting 0..1 progress. */
+    suspend fun downloadTo(path: String, dest: File, onProgress: (Float) -> Unit = {}): File {
+        val resp = execute { Request.Builder().url("$it$path").get().build() }
+        return writeBody(resp, dest, onProgress)
+    }
+
+    /**
+     * Runs the call against each candidate base URL in order (the last one that worked first), with a 2 s connect
+     * timeout on every candidate but the final one. A network failure moves on to the next candidate; an HTTP answer
+     * (even an error) is final, because it proves the PC was reached. Non-2xx becomes a [PcLinkException].
+     */
+    private suspend fun execute(build: (String) -> Request): Response {
+        val order = UrlOrder.order(bases, lastGood[memoryKey])
+        var failure: PcLinkException? = null
+        for ((i, b) in order.withIndex()) {
+            val client = if (i < order.size - 1) http.newBuilder().connectTimeout(FAST_CONNECT_S, TimeUnit.SECONDS).build() else http
+            val resp = try {
+                await(client.newCall(build(b)))
+            } catch (e: IOException) {
+                failure = PcLinkException(0, "network", e.message ?: "network error", network = true)
+                continue
+            }
+            lastGood[memoryKey] = b
+            if (resp.isSuccessful) return resp
+            val text = resp.use { runCatching { it.body.string() }.getOrDefault("") }
+            val err = runCatching { ProcJson.json.decodeFromString<ErrorEnvelope>(text).error }.getOrNull()
+            throw PcLinkException(resp.code, err?.code?.ifEmpty { null } ?: "http_${resp.code}", err?.message?.ifEmpty { null } ?: "HTTP ${resp.code}")
         }
-        if (resp.isSuccessful) return resp
-        val text = resp.use { runCatching { it.body.string() }.getOrDefault("") }
-        val err = runCatching { ProcJson.json.decodeFromString<ErrorEnvelope>(text).error }.getOrNull()
-        throw PcLinkException(resp.code, err?.code?.ifEmpty { null } ?: "http_${resp.code}", err?.message?.ifEmpty { null } ?: "HTTP ${resp.code}")
+        throw failure ?: PcLinkException(0, "network", "no PC address", network = true)
+    }
+
+    companion object {
+        const val FAST_CONNECT_S = 2L
+
+        /** The URL of [p] that answered last in this process, or null when none has yet. */
+        fun lastWorkingUrl(p: PairingInfo): String? = lastGood[p.allUrls().joinToString("|")]
+        private val lastGood = java.util.concurrent.ConcurrentHashMap<String, String>()
     }
 
     private suspend fun await(call: Call): Response = suspendCancellableCoroutine { cont ->

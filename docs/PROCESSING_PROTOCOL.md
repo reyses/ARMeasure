@@ -38,7 +38,7 @@ Tier (`ProfileRules`): LOW if `isLowRamDevice`, RAM < 3 GiB or < 4 cores; otherw
 
 ## 3. HTTP API (v1)
 
-Base URL from pairing. Every request carries `Authorization: Bearer <token>`. HTTPS, or plain http only to private LAN IPv4 literals (10/8, 172.16/12, 192.168/16); the phone refuses anything else and does not follow redirects. Max upload 2 GB. Responses are JSON except the result download.
+Base URL from pairing. Every request carries `Authorization: Bearer <token>`. HTTPS, or plain http only to private or Tailscale addresses: IPv4 literals in 10/8, 172.16/12, 192.168/16 and 100.64/10 (Tailscale CGNAT), IPv6 literals in fd7a:115c:a1e0::/48, bare single-label host names (MagicDNS short names such as `rxmoi`) and `*.ts.net`; the phone refuses anything else and does not follow redirects. Max upload 2 GB. Responses are JSON except the result download.
 
 | Call | Success | Notes |
 |---|---|---|
@@ -123,6 +123,14 @@ The PC shows a QR containing:
 ```json
 {"v":1,"url":"https://pc.example:8765","token":"<32+ random chars>","name":"RYZEN-PC"}
 ```
+
+The pairing JSON may also carry an ordered list `"urls": [tailnet, lan, tunnel]` next to `"url"`:
+
+```json
+{"v":1,"url":"http://100.101.102.103:8765","urls":["http://100.101.102.103:8765","http://192.168.0.247:8765","https://pc.example:8765"],"token":"<32+ random chars>","name":"Rxmoi"}
+```
+
+`PairingInfo.parse` accepts both forms (a code with only `url` still works; a code with only `urls` uses the first entry as `url`); every entry must pass the URL policy. `HttpPcLink` tries the entries in order with a 2 s connect timeout (the last entry gets the normal 10 s), moves on only on a network failure (an HTTP answer, even an error, proves the PC was reached), and remembers the last URL that worked, trying it first in later calls. The server should list the tailnet URL first.
 
 The phone validates `v == 1`, token length >= 32, URL policy (section 3), then stores url + token in EncryptedSharedPreferences (`AndroidPairingStore`; falls back to plain preferences with a TODO if the keystore fails) and calls `/v1/ping`.
 A self-signed HTTPS certificate is not trusted (system trust only); use LAN http mode, a real certificate or a tunnel.

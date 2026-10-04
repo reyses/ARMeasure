@@ -143,6 +143,10 @@ fun SettingsScreen(
                 }
             }
 
+            if (com.example.arruler.devlink.DevEntries.entry.enabled) {
+                Section("Dev (debug build)") { com.example.arruler.devlink.DevEntries.entry.SettingsSection(pairing) }
+            }
+
             Section("PC") {
                 if (pairing == null) {
                     Text("No PC paired. Start the PC server, then scan the QR code it shows.", style = MaterialTheme.typography.bodyMedium)

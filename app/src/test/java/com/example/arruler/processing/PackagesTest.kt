@@ -234,7 +234,7 @@ class PairingTest {
     @Test fun urlPolicyPrivateRanges() {
         for (ok in listOf("10.0.0.1", "10.255.255.255", "172.16.0.1", "172.31.255.1", "192.168.0.5"))
             assertTrue(ok, UrlPolicy.isAllowed("http://$ok:8000"))
-        for (bad in listOf("172.15.0.1", "172.32.0.1", "192.169.0.1", "11.0.0.1", "127.0.0.1", "169.254.1.1", "192.168.0", "192.168.0.256", "localhost", "pc.local"))
+        for (bad in listOf("172.15.0.1", "172.32.0.1", "192.169.0.1", "11.0.0.1", "127.0.0.1", "169.254.1.1", "192.168.0", "192.168.0.256", "localhost", "pc.local", "pc.example.com"))
             assertFalse(bad, UrlPolicy.isAllowed("http://$bad:8000"))
     }
 
@@ -252,5 +252,89 @@ class PairingTest {
         assertEquals(JobStatus.Failed("boom"), st("""{"id":"a","state":"failed","error":"boom"}"""))
         assertEquals(JobStatus.Cancelled, st("""{"state":"cancelled"}"""))
         assertTrue(st("""{"state":"weird"}""") is JobStatus.Failed)
+    }
+}
+
+class TailnetPolicyTest {
+    private fun ok(host: String) = UrlPolicy.isAllowed("http://$host:8765")
+
+    @Test fun cgnatBoundaries() {
+        assertFalse(ok("100.63.255.255"))
+        assertTrue(ok("100.64.0.0"))
+        assertTrue(ok("100.100.100.100"))
+        assertTrue(ok("100.127.255.255"))
+        assertFalse(ok("100.128.0.0"))
+        assertFalse(ok("101.64.0.1"))
+        assertFalse(ok("99.64.0.1"))
+    }
+
+    @Test fun publicIpsStillRejected() {
+        assertFalse(ok("8.8.8.8"))
+        assertFalse(ok("203.0.113.9"))
+    }
+
+    @Test fun tailnetIpv6Prefix() {
+        assertTrue(UrlPolicy.isAllowed("http://[fd7a:115c:a1e0::1]:8765"))
+        assertTrue(UrlPolicy.isAllowed("http://[fd7a:115c:a1e0:ab12:4843:cd96:6258:1234]:8765"))
+        assertTrue(UrlPolicy.isAllowed("http://[fd7a:115c:a1e0:ffff:ffff:ffff:ffff:ffff]/"))
+        assertFalse(UrlPolicy.isAllowed("http://[fd7a:115c:a1e1::1]:8765"))
+        assertFalse(UrlPolicy.isAllowed("http://[fd7a:115c:a1df::1]:8765"))
+        assertFalse(UrlPolicy.isAllowed("http://[2001:db8::1]:8765"))
+        assertFalse(UrlPolicy.isAllowed("http://[::1]:8765"))
+    }
+
+    @Test fun magicDnsNames() {
+        assertTrue(ok("rxmoi"))
+        assertTrue(ok("Rxmoi"))
+        assertTrue(ok("my-pc-2"))
+        assertTrue(ok("example.ts.net"))
+        assertTrue(ok("rxmoi.tail1234.ts.net"))
+        assertFalse(ok("ts.net"))
+        assertFalse(ok("evil-ts.net"))
+        assertFalse(ok("example.ts.net.evil.com"))
+        assertFalse(ok("example.com"))
+        assertFalse(ok("localhost"))
+    }
+
+    @Test fun httpsStillAnywhere() = assertTrue(UrlPolicy.isAllowed("https://pc.example.com"))
+}
+
+class PairingUrlsTest {
+    private val token = "b".repeat(32)
+    private fun json(url: String?, urls: List<String>?): String {
+        val u = url?.let { """"url":"$it",""" } ?: ""
+        val us = urls?.let { """"urls":[${it.joinToString(",") { x -> "\"$x\"" }}],""" } ?: ""
+        return """{"v":1,$u$us"token":"$token","name":"Rxmoi"}"""
+    }
+
+    @Test fun legacyUrlOnlyStillParses() {
+        val p = PairingInfo.parse(json("http://192.168.0.247:8765/", null)).getOrThrow()
+        assertEquals("http://192.168.0.247:8765", p.url)
+        assertEquals(listOf("http://192.168.0.247:8765"), p.allUrls())
+        assertTrue(p.urls.isEmpty())
+    }
+
+    @Test fun urlsListKeepsOrderAndFirstBecomesUrl() {
+        val p = PairingInfo.parse(json("http://192.168.0.247:8765", listOf("http://100.101.102.103:8765/", "http://192.168.0.247:8765", "https://x.trycloudflare.com"))).getOrThrow()
+        assertEquals(listOf("http://100.101.102.103:8765", "http://192.168.0.247:8765", "https://x.trycloudflare.com"), p.allUrls())
+        assertEquals("http://100.101.102.103:8765", p.url)
+    }
+
+    @Test fun urlsOnlyWithoutUrl() {
+        val p = PairingInfo.parse(json(null, listOf("http://rxmoi:8765"))).getOrThrow()
+        assertEquals("http://rxmoi:8765", p.url)
+    }
+
+    @Test fun anyDisallowedEntryFailsTheWholeCode() {
+        assertTrue(PairingInfo.parse(json("http://192.168.0.247:8765", listOf("http://8.8.8.8:8765"))).isFailure)
+    }
+
+    @Test fun noUrlAtAllFails() = assertTrue(PairingInfo.parse(json(null, null)).isFailure)
+
+    @Test fun tryOrderPutsLastGoodFirst() {
+        val u = listOf("a", "b", "c")
+        assertEquals(listOf("a", "b", "c"), UrlOrder.order(u, null))
+        assertEquals(listOf("c", "a", "b"), UrlOrder.order(u, "c"))
+        assertEquals(listOf("a", "b", "c"), UrlOrder.order(u, "zzz"))
     }
 }

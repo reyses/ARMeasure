@@ -328,6 +328,8 @@ class MainActivity : AppCompatActivity() {
         scan = ScanController(lifecycleScope)
         objectScan = ObjectScanController(lifecycleScope)
         hub = ProcessingHub(this, lifecycleScope)
+        com.example.arruler.devlink.DevEntries.entry.onCreate(application)
+        lifecycleScope.launch { hub.pairing.collect { com.example.arruler.devlink.DevEntries.entry.onPairing(this@MainActivity, it) } }
         handlePlaybackIntent(intent)
 
         lifecycleScope.launch {

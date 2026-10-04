@@ -1,0 +1,18 @@
+package com.example.arruler.devlink
+
+import android.app.Application
+import android.content.Context
+import androidx.compose.runtime.Composable
+import com.example.arruler.processing.PairingInfo
+
+/** Release build: there is no dev link. */
+object DevEntries {
+    val entry: DevEntry = object : DevEntry {
+        override val enabled = false
+        override fun onCreate(app: Application) = Unit
+        override fun onPairing(context: Context, pairing: PairingInfo?) = Unit
+
+        @Composable
+        override fun SettingsSection(pairing: PairingInfo?) = Unit
+    }
+}

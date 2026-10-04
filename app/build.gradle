@@ -4,6 +4,19 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+// Short git commit of the checked-out tree, embedded as BuildConfig.GIT_COMMIT (the debug dev link compares it with the PC's newest APK).
+def gitCommit = 'unknown'
+try {
+    def out = providers.exec {
+        commandLine 'git', 'rev-parse', '--short', 'HEAD'
+        workingDir = rootProject.projectDir
+        ignoreExitValue = true
+    }.standardOutput.asText.get().trim()
+    if (out ==~ /[0-9a-f]{7,40}/) gitCommit = out
+} catch (Exception ignored) {
+    // no git on PATH or not a repository: keep 'unknown'
+}
+
 android {
     namespace = 'com.example.arruler'
     compileSdk = 37
@@ -14,6 +27,7 @@ android {
         targetSdk = 37
         versionCode = 1
         versionName = "1.0.0"
+        buildConfigField 'String', 'GIT_COMMIT', "\"${gitCommit}\""
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -52,6 +66,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     if (project.hasProperty('phoneOnly')) {
