@@ -82,6 +82,7 @@ dependencies {
     implementation libs.okhttp
     // QR pairing: Google code scanner (own activity, no camera permission, no CameraX)
     implementation libs.play.services.code.scanner
+    implementation libs.play.services.nearby
     // Tap-to-box 2D proposals: ML Kit Object Detection, bundled base model (offline from first launch, no Play-services download)
     implementation libs.mlkit.object.detection
 
