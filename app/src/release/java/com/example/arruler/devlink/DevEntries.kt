@@ -11,6 +11,8 @@ object DevEntries {
         override val enabled = false
         override fun onCreate(app: Application) = Unit
         override fun onPairing(context: Context, pairing: PairingInfo?) = Unit
+        override fun recordError(context: Context, where: String, error: Throwable) = Unit
+        override suspend fun sendReport(context: Context, pairing: PairingInfo?, text: String): String? = null
 
         @Composable
         override fun SettingsSection(pairing: PairingInfo?) = Unit

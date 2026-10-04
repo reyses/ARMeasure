@@ -7,6 +7,7 @@ import com.example.arruler.processing.CloudData
 import com.example.arruler.scan3d.ScanSnapshot
 import com.example.arruler.scan3d.SnapshotPlane
 import com.google.ar.core.Frame
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -191,7 +192,10 @@ class ScanController(private val scope: CoroutineScope) {
             }
         }
 
-    /** Runs plane extraction + room reconstruction off the main thread; result in [analysis]. */
+    /**
+     * Runs plane extraction + room reconstruction off the main thread; result in [analysis]. A failure lands in [failure]
+     * (the caller shows the error card) instead of escaping the coroutine and killing the app.
+     */
     fun analyze() {
         if (_analyzing.value) return
         _analyzing.value = true
@@ -202,9 +206,21 @@ class ScanController(private val scope: CoroutineScope) {
                 val pts = lock.withLock { cloud.points(ScanLogic.ANALYZE_MIN_HITS) }
                 val result = ScanLogic.analyze(pts)
                 if (gen == generation) _analysis.value = result
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _failure.value = e
+            } catch (e: OutOfMemoryError) {
+                _failure.value = e
             } finally {
                 _analyzing.value = false
             }
         }
     }
+
+    private val _failure = MutableStateFlow<Throwable?>(null)
+    /** The last Analyze failure, until [clearFailure]. */
+    val failure: StateFlow<Throwable?> = _failure.asStateFlow()
+
+    fun clearFailure() { _failure.value = null }
 }

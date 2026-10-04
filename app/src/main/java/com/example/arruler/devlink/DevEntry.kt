@@ -20,6 +20,15 @@ interface DevEntry {
     /** Called at launch and whenever the pairing changes (debug: uploads a crash recorded by the previous run). */
     fun onPairing(context: Context, pairing: PairingInfo?)
 
+    /**
+     * A failure that was caught at an action boundary (or reached a coroutine exception handler): debug records it to the
+     * same crash file as an uncaught crash, so it is uploaded at the next pairing; release does nothing.
+     */
+    fun recordError(context: Context, where: String, error: Throwable)
+
+    /** Debug and paired: uploads [text] to the PC as a crash report and returns the line to show; otherwise null (share it instead). */
+    suspend fun sendReport(context: Context, pairing: PairingInfo?, text: String): String?
+
     /** The body of Settings > Dev (debug only). */
     @Composable
     fun SettingsSection(pairing: PairingInfo?)

@@ -226,6 +226,13 @@ class ArSessionController(
 
     internal fun onSessionPaused(@Suppress("UNUSED_PARAMETER") session: Session) {
         recorder.onSessionPaused()
+        // A Frame (and its hit tests, camera, images) is invalid once the session pauses: drop it so no tap, ray or
+        // camera query between the pause and the next update touches it.
+        lastFrame = null
+        cachedFrame = null
+        cachedCenter = null
+        _hasSurface.value = false
+        _centerHit.value = null
     }
 
     internal fun onSessionUpdated(session: Session, frame: Frame) {

@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
 import android.view.HapticFeedbackConstants
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -159,6 +160,9 @@ import com.example.arruler.ui.AreaControls
 import com.example.arruler.ui.ArRulerTheme
 import com.example.arruler.ui.CardAction
 import com.example.arruler.ui.ConfirmDialog
+import com.example.arruler.ui.ErrorCard
+import com.example.arruler.diag.ActionError
+import com.example.arruler.diag.ActionErrors
 import com.example.arruler.ui.ControlsBar
 import com.example.arruler.ui.DepthConfidenceOverlay
 import com.example.arruler.ui.SurfacesControl
@@ -187,6 +191,8 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -305,6 +311,19 @@ class MainActivity : AppCompatActivity() {
     /** Shared plan frame of the current AR session: set by the first saved room, dropped with the world. */
     private var planFrame: PlanFrame? = null
 
+    /** A failure of Analyze / View 3D caught at its boundary, shown as the error card; null when none. */
+    private var actionError by mutableStateOf<ActionError?>(null)
+
+    /**
+     * On the scan controller's scope (Analyze, preview, snapshot): an exception that still escapes a coroutine there is
+     * recorded to the debug crash file first, then handed to the default handler exactly as without this handler.
+     */
+    private val scanCrashHandler = CoroutineExceptionHandler { _, e ->
+        try { com.example.arruler.devlink.DevEntries.entry.recordError(applicationContext, "scan coroutine", e) } catch (_: Throwable) { }
+        val t = Thread.currentThread()
+        (t.uncaughtExceptionHandler ?: Thread.getDefaultUncaughtExceptionHandler())?.uncaughtException(t, e) ?: throw e
+    }
+
     /** Bound to the composition's view while it exists (see [setContent] below). */
     private var haptic: () -> Unit = {}
 
@@ -325,7 +344,7 @@ class MainActivity : AppCompatActivity() {
         ar.onFrame = ::onArFrame
         ar.onTap = ::onArTap
         ar.onSurfaces = renderer::renderSurfaces
-        scan = ScanController(lifecycleScope)
+        scan = ScanController(CoroutineScope(lifecycleScope.coroutineContext + scanCrashHandler))
         objectScan = ObjectScanController(lifecycleScope)
         hub = ProcessingHub(this, lifecycleScope)
         com.example.arruler.devlink.DevEntries.entry.onCreate(application)
@@ -354,6 +373,15 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 scan.preview.collect { if (appMode == AppMode.SCAN) renderer.renderCloud(it) }
+            }
+        }
+
+        lifecycleScope.launch {
+            scan.failure.collect { e ->
+                if (e != null) {
+                    scan.clearFailure()
+                    showActionError("Analyze", e)
+                }
             }
         }
 
@@ -407,7 +435,11 @@ class MainActivity : AppCompatActivity() {
                     // anchors and the shared plan frame survive a visit to Projects/Plan. Under the 3D
                     // viewer it is held paused (same composition, session paused, no drawing) so the two
                     // GL surfaces never render together and the anchors still survive.
-                    ArSceneHost(ar, renderer, Modifier.fillMaxSize(), paused = screen is Screen.Scan3D || screen is Screen.ObjectDetail || screen == Screen.Diagnostics || arPaused)
+                    ArSceneHost(
+                        ar, renderer, Modifier.fillMaxSize(),
+                        paused = screen is Screen.Scan3D || screen is Screen.ObjectDetail || screen == Screen.Diagnostics || arPaused,
+                        onRecordingStopped = { toastLong("Recording stopped and saved (the camera view paused)") },
+                    )
                     if (screen == Screen.Measure && showDepth) DepthConfidenceOverlay(depthHeat)
                     if (screen == Screen.Measure && appMode == AppMode.OBJECT &&
                         (objState.phase == ObjectPhase.IDLE || objState.phase == ObjectPhase.PLACED)
@@ -553,14 +585,22 @@ class MainActivity : AppCompatActivity() {
                             )
                         }
                         is Screen.Scan3D -> Surface(Modifier.fillMaxSize()) {
-                            val snap = scan3dSnapshot?.takeIf { it.id == s.scanId }
-                                ?: remember(s.scanId) { ScanFiles.load(scansRoot(this@MainActivity), s.scanId) }
+                            val fresh = scan3dSnapshot?.takeIf { it.id == s.scanId }
+                            // a saved scan is read off the main thread; null while loading
+                            val loaded by produceState<Pair<Boolean, ScanSnapshot?>>(false to null, s.scanId, fresh) {
+                                value = if (fresh != null) true to fresh
+                                else true to withContext(Dispatchers.IO) { ScanFiles.load(scansRoot(this@MainActivity), s.scanId) }
+                            }
+                            val snap = fresh ?: loaded.second
                             if (snap == null) {
-                                LaunchedEffect(Unit) { toast("Scan not found"); screen = scan3dReturnTo }
+                                if (loaded.first) LaunchedEffect(Unit) { toast("Scan not found"); screen = scan3dReturnTo }
                             } else {
                                 val tex = scan3dTextured
                                     ?: if (snap.kind == ScanSnapshot.KIND_OBJECT) rememberSavedTextured(s.scanId) else null
-                                Scan3DViewer(snap, onBack = { screen = scan3dReturnTo }, textured = tex)
+                                Scan3DViewer(
+                                    snap, onBack = { screen = scan3dReturnTo }, textured = tex,
+                                    onError = { e -> screen = scan3dReturnTo; showActionError("View 3D", e) },
+                                )
                             }
                         }
                         Screen.Objects -> Surface(Modifier.fillMaxSize()) {
@@ -639,6 +679,9 @@ class MainActivity : AppCompatActivity() {
                         )
                     }
                     SaveSnackbar(saveNote, ::onSnackOpenFolder, ::onSnackShare) { saveNote = null }
+                    actionError?.let { err ->
+                        ErrorCard(err.reason, onSendReport = { sendErrorReport(err) }, onDismiss = { actionError = null })
+                    }
                 }
                 BackHandler(enabled = screen != Screen.Measure) {
                     screen = when (screen) {
@@ -814,10 +857,10 @@ class MainActivity : AppCompatActivity() {
      */
     private fun onScanView3D() {
         scan.pause()
-        lifecycleScope.launch {
+        launchGuarded("View 3D") {
             val id = java.util.UUID.randomUUID().toString()
             val projectId = scanProjectId()
-            val snap = scan.snapshot(id, projectId) ?: return@launch toast("Nothing scanned yet")
+            val snap = scan.snapshot(id, projectId) ?: return@launchGuarded toast("Nothing scanned yet")
             withContext(Dispatchers.IO) { runCatching { ScanFiles.save(scansRoot(this@MainActivity), snap) } }
                 .onFailure { toast("Could not save the scan: ${it.message}") }
             scan3dSnapshot = snap
@@ -1330,11 +1373,70 @@ class MainActivity : AppCompatActivity() {
 
     private fun onObjectView3D(r: ObjectResultState) {
         val mesh = r.mesh ?: return toast("No mesh was produced")
-        val id = r.savedId ?: java.util.UUID.randomUUID().toString()
-        scan3dSnapshot = objectSnapshot(r, id, null, mesh, null)
-        scan3dTextured = r.textured?.viewData
-        scan3dReturnTo = Screen.Measure
-        screen = Screen.Scan3D(id)
+        if (mesh.vertexCount == 0 || mesh.triangleCount == 0) return toast(com.example.arruler.scan3d.ViewerScene.EMPTY_TEXT)
+        try {
+            val id = r.savedId ?: java.util.UUID.randomUUID().toString()
+            scan3dSnapshot = objectSnapshot(r, id, null, mesh, null)
+            scan3dTextured = r.textured?.viewData
+            scan3dReturnTo = Screen.Measure
+            screen = Screen.Scan3D(id)
+        } catch (e: Exception) {
+            showActionError("View 3D", e)
+        }
+    }
+
+    /**
+     * The error boundary of Analyze and View 3D: [block] runs on the main scope; any exception (or an out-of-memory) is
+     * logged with its stack trace, recorded for the debug dev link and shown as the error card instead of killing the app.
+     * Cancellation passes through.
+     */
+    private fun launchGuarded(action: String, block: suspend CoroutineScope.() -> Unit) = lifecycleScope.launch {
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            showActionError(action, e)
+        } catch (e: OutOfMemoryError) {
+            showActionError(action, e)
+        }
+    }
+
+    private fun showActionError(action: String, e: Throwable) {
+        Log.e(TAG, "$action failed", e)
+        try { com.example.arruler.devlink.DevEntries.entry.recordError(applicationContext, action, e) } catch (_: Exception) { }
+        val header = "ARMeasure ${BuildConfig.VERSION_NAME} commit ${BuildConfig.GIT_COMMIT} (${BuildConfig.BUILD_TYPE}), " +
+            "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, Android ${android.os.Build.VERSION.RELEASE}, " +
+            "recording ${ar.recorder.state.value::class.simpleName}, screen ${screen::class.simpleName}, mode $appMode"
+        actionError = ActionErrors.of(action, e, header, System.currentTimeMillis())
+    }
+
+    /** Send report: to the PC over the debug dev link when paired, otherwise the share sheet with the report text. */
+    private fun sendErrorReport(err: ActionError) {
+        lifecycleScope.launch {
+            val receipt = try {
+                com.example.arruler.devlink.DevEntries.entry.sendReport(this@MainActivity, hub.pairing.value, err.report)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "report upload failed", e)
+                null
+            }
+            if (receipt != null) {
+                toastLong(receipt)
+                actionError = null
+                return@launch
+            }
+            try {
+                val send = Intent(Intent.ACTION_SEND).setType("text/plain")
+                    .putExtra(Intent.EXTRA_SUBJECT, "ARMeasure error: ${err.action}")
+                    .putExtra(Intent.EXTRA_TEXT, err.report)
+                startActivity(Intent.createChooser(send, "Send report"))
+                actionError = null
+            } catch (e: Exception) {
+                toastLong("No app to share the report with: ${e.message}")
+            }
+        }
     }
 
     private fun onObjectShare(r: ObjectResultState, format: MeshExport) {
@@ -1558,8 +1660,8 @@ class MainActivity : AppCompatActivity() {
             return
         }
         scan.pause()
-        lifecycleScope.launch {
-            val cloud = scan.cloudData() ?: return@launch toast("Nothing scanned yet")
+        launchGuarded("Analyze") {
+            val cloud = scan.cloudData() ?: return@launchGuarded toast("Nothing scanned yet")
             procUi = ProcessingUi("Preparing the scan")
             val job = ProcessingJob(
                 type = JobType.SCAN_ANALYZE, estimate = JobEstimate(pointCount = cloud.count),
@@ -1612,9 +1714,9 @@ class MainActivity : AppCompatActivity() {
 
     /** Saves the scan with the PC's planes (and mesh, when it made one) and opens the 3D viewer. */
     private fun onScanPcView3D(r: ScanPcResult) {
-        lifecycleScope.launch {
+        launchGuarded("View 3D") {
             val id = java.util.UUID.randomUUID().toString()
-            val snap = scan.snapshotWith(id, scanProjectId(), r.planes, r.mesh) ?: return@launch toast("Nothing scanned yet")
+            val snap = scan.snapshotWith(id, scanProjectId(), r.planes, r.mesh) ?: return@launchGuarded toast("Nothing scanned yet")
             withContext(Dispatchers.IO) { runCatching { ScanFiles.save(scansRoot(this@MainActivity), snap) } }
                 .onFailure { toast("Could not save the scan: ${it.message}") }
             scan3dSnapshot = snap
@@ -1748,6 +1850,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         const val EXTRA_PLAYBACK_URI = "playback_uri"
+        private const val TAG = "MainActivity"
         private const val PREFS = "plan"
         private const val KEY_LAST_PROJECT = "last_project"
 

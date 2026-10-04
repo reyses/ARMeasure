@@ -1,5 +1,9 @@
 package com.example.arruler.scan3d
 
+import android.graphics.Bitmap
+import android.opengl.EGL14
+import android.opengl.EGLContext
+import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -21,30 +25,30 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.arruler.depth.PlaneKind
-import com.example.arruler.geometry.ColorRamp
 import com.example.arruler.objscan.TexturedMeshData
-import com.example.arruler.objscan.TriMesh
-import com.example.arruler.texture.TexturedMeshNode
-import com.example.arruler.texture.VertexColouredMeshNode
-import com.google.android.filament.Box as FilamentBox
 import com.google.android.filament.Engine
 import com.google.android.filament.MaterialInstance
 import com.google.android.filament.RenderableManager.PrimitiveType
 import dev.romainguy.kotlin.math.Float2
 import dev.romainguy.kotlin.math.Float3
 import dev.romainguy.kotlin.math.Float4
+import io.github.sceneview.SceneScope
 import io.github.sceneview.SceneView
 import io.github.sceneview.geometries.Geometry
 import io.github.sceneview.loaders.MaterialLoader
@@ -52,112 +56,110 @@ import io.github.sceneview.rememberCameraManipulator
 import io.github.sceneview.rememberCameraNode
 import io.github.sceneview.rememberEngine
 import io.github.sceneview.rememberMaterialLoader
+import io.github.sceneview.texture.ImageTexture
+import io.github.sceneview.utils.OpenGL
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
-/** How the point cloud is coloured. */
-enum class ColourMode(val label: String) { QUALITY("Colour by quality"), KIND("Colour by kind") }
-
-/**
- * Pure grouping of the cloud into (colour, point indices) buckets, one rendered mesh per bucket, because
- * the SceneView colour materials take ONE uniform colour per material instance (no per-vertex colour material
- * ships with 4.52). Quality mode: [QUALITY_BUCKETS] buckets along the ramp. Kind mode: one bucket per plane kind plus grey.
- * The cloud is thinned evenly to at most [maxDisplay] points first.
- */
-internal object ViewerGroups {
-    const val QUALITY_BUCKETS = 10
-
-    class Group(val rgb: Int, val indices: IntArray)
-
-    fun build(s: ScanSnapshot, mode: ColourMode, maxDisplay: Int): List<Group> {
-        val n = s.pointCount
-        val take = minOf(n, maxDisplay)
-        if (take == 0) return emptyList()
-        val src = IntArray(take) { if (take == n) it else (it.toLong() * n / take).toInt() }
-        val buckets = HashMap<Int, MutableList<Int>>()
-        if (mode == ColourMode.QUALITY) {
-            for (i in src) {
-                val b = (s.quality[i] * QUALITY_BUCKETS).toInt().coerceIn(0, QUALITY_BUCKETS - 1)
-                buckets.getOrPut(ColorRamp.rgb((b + 0.5f) / QUALITY_BUCKETS)) { ArrayList() }.add(i)
-            }
-        } else {
-            val planeOf = s.planeIndexPerPoint()
-            for (i in src) {
-                val c = if (planeOf[i] < 0) KindColors.UNASSIGNED else KindColors.rgb(s.planes[planeOf[i]].kind)
-                buckets.getOrPut(c) { ArrayList() }.add(i)
-            }
-        }
-        return buckets.map { (c, l) -> Group(c, l.toIntArray()) }.sortedBy { it.rgb }
-    }
-}
+private const val TAG = "Scan3DViewer"
 
 private fun rgbToFloat4(rgb: Int, a: Float = 1f) =
     Float4(((rgb shr 16) and 0xFF) / 255f, ((rgb shr 8) and 0xFF) / 255f, (rgb and 0xFF) / 255f, a)
 
-private const val DOTS_MAX = 60_000
-private const val BIG_DOTS_MAX = 25_000
-private const val BIG_DOT_SIZE_M = 0.016f
-
-/** POINTS primitive geometry: one vertex and one index per point. */
-private fun pointsGeometry(engine: Engine, s: ScanSnapshot, idx: IntArray): Geometry {
-    val verts = ArrayList<Geometry.Vertex>(idx.size)
-    val ind = ArrayList<Int>(idx.size)
-    for ((k, i) in idx.withIndex()) {
-        verts += Geometry.Vertex(position = Float3(s.points[i * 3], s.points[i * 3 + 1], s.points[i * 3 + 2]))
-        ind += k
+/**
+ * The viewer's EGL context, created WITHOUT taking over the main thread. SceneView's default `createEglContext()` makes
+ * its new context current on the calling (main) thread and never gives it back; the paused AR view below shares that
+ * thread, and ARCore's `Session.update()` updates the camera texture in whatever context is current there. Without
+ * this, the AR camera came back on a destroyed foreign context after Back (no camera image or an ARCore error).
+ */
+internal object ViewerEgl {
+    fun createKeepingCurrent(): EGLContext {
+        val display = EGL14.eglGetCurrentDisplay()
+        val draw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
+        val read = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
+        val previous = EGL14.eglGetCurrentContext()
+        val created = OpenGL.createEglContext()
+        if (previous != EGL14.EGL_NO_CONTEXT && display != EGL14.EGL_NO_DISPLAY) {
+            if (!EGL14.eglMakeCurrent(display, draw, read, previous)) {
+                Log.w(TAG, "could not restore the previous EGL context: 0x${Integer.toHexString(EGL14.eglGetError())}")
+            }
+        }
+        return created
     }
-    return Geometry.Builder(PrimitiveType.POINTS).vertices(verts).indices(ind).build(engine)
 }
 
-/** Fallback for renderers that draw POINTS at 1 px: one small tetrahedron per point (4 vertices, 4 triangles). */
-private fun tetraGeometry(engine: Engine, s: ScanSnapshot, idx: IntArray): Geometry {
-    val h = BIG_DOT_SIZE_M
-    val verts = ArrayList<Geometry.Vertex>(idx.size * 4)
-    val ind = ArrayList<Int>(idx.size * 12)
-    for ((k, i) in idx.withIndex()) {
-        val x = s.points[i * 3]; val y = s.points[i * 3 + 1]; val z = s.points[i * 3 + 2]
-        verts += Geometry.Vertex(position = Float3(x + h, y + h, z + h))
-        verts += Geometry.Vertex(position = Float3(x + h, y - h, z - h))
-        verts += Geometry.Vertex(position = Float3(x - h, y + h, z - h))
-        verts += Geometry.Vertex(position = Float3(x - h, y - h, z + h))
-        val b = k * 4
-        // both windings so the tiles show whichever way the material culls
-        for (t in intArrayOf(0, 1, 2, 0, 3, 1, 0, 2, 3, 1, 3, 2)) ind += b + t
-        for (t in intArrayOf(0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3)) ind += b + t
-    }
-    return Geometry.Builder(PrimitiveType.TRIANGLES).vertices(verts).indices(ind).build(engine)
-}
-
-/** Indexed triangle mesh of an object scan, lit by SceneView's default light (outward counter-clockwise triangles). */
-private fun meshGeometry(engine: Engine, m: TriMesh, uv: FloatArray?): Geometry {
-    val verts = ArrayList<Geometry.Vertex>(m.vertexCount)
-    for (i in 0 until m.vertexCount) {
+/** Filament upload of checked arrays (main thread, the engine's thread). */
+private fun MeshArrays.toGeometry(engine: Engine): Geometry {
+    val n = vertexCount
+    val verts = ArrayList<Geometry.Vertex>(n)
+    val nr = normals
+    val uv = uvs
+    for (i in 0 until n) {
         verts += Geometry.Vertex(
-            position = Float3(m.vertices[i * 3], m.vertices[i * 3 + 1], m.vertices[i * 3 + 2]),
-            normal = Float3(m.normals[i * 3], m.normals[i * 3 + 1], m.normals[i * 3 + 2]),
-            uvCoordinate = uv?.let { Float2(it[i * 2], it[i * 2 + 1]) } ?: Float2(0f, 0f),
+            position = Float3(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]),
+            normal = nr?.let { Float3(it[i * 3], it[i * 3 + 1], it[i * 3 + 2]) },
+            uvCoordinate = uv?.let { Float2(it[i * 2], it[i * 2 + 1]) },
         )
     }
-    val ind = ArrayList<Int>(m.indices.size)
-    for (i in m.indices) ind += i
-    return Geometry.Builder(PrimitiveType.TRIANGLES).vertices(verts).indices(ind).build(engine)
+    val type = if (primitive == Primitive.POINTS) PrimitiveType.POINTS else PrimitiveType.TRIANGLES
+    return Geometry.Builder(type).vertices(verts).indices(indices.asList()).build(engine)
 }
 
-/** Fan-triangulated polygon, both windings (so the fill shows from either side regardless of culling). */
-private fun planeGeometry(engine: Engine, p: SnapshotPlane): Geometry {
-    val n = p.vertexCount
-    val normal = Float3(p.nx, p.ny, p.nz)
-    val verts = ArrayList<Geometry.Vertex>(n)
-    for (i in 0 until n) {
-        verts += Geometry.Vertex(position = Float3(p.outline[i * 3], p.outline[i * 3 + 1], p.outline[i * 3 + 2]), normal = normal, uvCoordinate = Float2(0f, 0f))
+/**
+ * One part as a MeshNode. The arrays were checked by [ViewerGeometry]; a Filament-side failure is reported through
+ * [onError] once and the part is skipped instead of taking the app down.
+ */
+@Composable
+private fun SceneScope.PartNode(
+    engine: Engine,
+    materialLoader: MaterialLoader,
+    part: ScenePart,
+    atlas: Bitmap?,
+    meshMaterial: MaterialInstance?,
+    onError: (Throwable) -> Unit,
+) {
+    val texture = remember(part.material, atlas) {
+        if (part.material == PartMaterial.Atlas && atlas != null) {
+            try { ImageTexture.Builder().bitmap(atlas).build(engine) } catch (e: Exception) { onError(e); null }
+        } else null
     }
-    val ind = ArrayList<Int>((n - 2) * 6)
-    for (i in 1 until n - 1) { ind += 0; ind += i; ind += i + 1 }
-    for (i in 1 until n - 1) { ind += 0; ind += i + 1; ind += i }
-    return Geometry.Builder(PrimitiveType.TRIANGLES).vertices(verts).indices(ind).build(engine)
+    // declared before the node so that, disposing in reverse order, the texture outlives the renderable
+    DisposableEffect(texture) { onDispose { texture?.let { t -> runCatching { engine.destroyTexture(t) } } } }
+    val geo = remember(part) {
+        try { part.arrays.toGeometry(engine) } catch (e: Exception) { onError(e); null }
+    } ?: return
+    val mat = remember(part.material, texture, meshMaterial) {
+        try {
+            when (val m = part.material) {
+                is PartMaterial.Unlit -> materialLoader.createUnlitColorInstance(rgbToFloat4(m.rgb, m.alpha))
+                is PartMaterial.Lit -> meshMaterial ?: materialLoader.createColorInstance(0xFF000000.toInt() or m.rgb, 0f, 0.6f, 0.5f)
+                PartMaterial.Atlas -> texture?.let { materialLoader.createTextureInstance(it, true, 0f, 0.85f, 0.3f) }
+            }
+        } catch (e: Exception) { onError(e); null }
+    } ?: return
+    MeshNode(
+        primitiveType = geo.primitiveType,
+        vertexBuffer = geo.vertexBuffer,
+        indexBuffer = geo.indexBuffer,
+        boundingBox = geo.boundingBox,
+        materialInstance = mat,
+    )
+}
+
+/** Loading, a built scene, or the reason building failed. */
+private sealed interface SceneState {
+    data object Loading : SceneState
+    class Ready(val scene: ViewerScene) : SceneState
+    class Failed(val error: Throwable) : SceneState
 }
 
 /**
  * Full-screen 3D view of a [ScanSnapshot]: orbit with one finger, pan with two, pinch to zoom (SceneView's
  * camera manipulator). Toggles for Points / Surfaces / colour mode / big dots, a Top view button and a legend.
+ * The drawable arrays are built off the main thread ([ViewerScene.build]); a scan with nothing drawable shows
+ * [ViewerScene.EMPTY_TEXT], a room scan without a room shows which pieces are missing ([ViewerScene.missingNote]).
+ * Any failure while building or uploading goes to [onError] (the caller shows the error card).
  */
 @Composable
 fun Scan3DViewer(
@@ -167,6 +169,7 @@ fun Scan3DViewer(
     compact: Boolean = false,
     /** The photo-textured (or vertex-coloured) version of the mesh; the grey mesh only when this is null. */
     textured: TexturedMeshData? = null,
+    onError: (Throwable) -> Unit = { Log.e(TAG, "3D view failed", it) },
 ) {
     BackHandler(enabled = !compact, onBack = onBack)
     var showPoints by remember { mutableStateOf(!compact || snapshot.mesh == null) }
@@ -174,13 +177,40 @@ fun Scan3DViewer(
     var mode by remember { mutableStateOf(ColourMode.QUALITY) }
     var bigDots by remember { mutableStateOf(false) }
     var topView by remember { mutableStateOf(false) }
+    val reportError by rememberUpdatedState(onError)
+    // one report per viewer: a broken scan would otherwise report once per part
+    val reported = remember(snapshot) { java.util.concurrent.atomic.AtomicBoolean(false) }
+    val fail: (Throwable) -> Unit = { e -> if (reported.compareAndSet(false, true)) reportError(e) }
 
-    val engine = rememberEngine()
+    val engine = rememberEngine(eglContextCreator = ViewerEgl::createKeepingCurrent)
     val materialLoader = rememberMaterialLoader(engine)
 
-    val b = remember(snapshot) { snapshot.bounds() ?: floatArrayOf(-1f, 0f, -1f, 1f, 2f, 1f) }
-    val target = remember(b) { Float3((b[0] + b[3]) / 2, (b[1] + b[4]) / 2, (b[2] + b[5]) / 2) }
-    val span = remember(b) { maxOf(b[3] - b[0], b[4] - b[1], b[5] - b[2]).coerceAtLeast(1f) }
+    val sceneState by produceState<SceneState>(SceneState.Loading, snapshot, textured, showPoints, showSurfaces, mode, bigDots) {
+        value = SceneState.Loading
+        value = try {
+            SceneState.Ready(
+                withContext(Dispatchers.Default) {
+                    val uv = ViewerHooks.meshUv?.let { f -> snapshot.mesh?.let { f(snapshot) } }
+                    ViewerScene.build(snapshot, textured, showPoints, showSurfaces, mode, bigDots, uv)
+                },
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            SceneState.Failed(e)
+        } catch (e: OutOfMemoryError) {
+            SceneState.Failed(e)
+        }
+    }
+    (sceneState as? SceneState.Failed)?.let { f -> androidx.compose.runtime.LaunchedEffect(f) { fail(f.error) } }
+    val scene = (sceneState as? SceneState.Ready)?.scene
+
+    val framing = remember(snapshot) { ViewerScene.framing(snapshot) }
+    val target = remember(framing) { Float3(framing[0], framing[1], framing[2]) }
+    val span = framing[3]
+    val meshMaterial = remember(materialLoader, snapshot) {
+        ViewerHooks.meshMaterial?.let { f -> runCatching { f(materialLoader, snapshot) }.getOrNull() }
+    }
 
     Box(modifier.fillMaxSize().background(Color(0xFF101114))) {
         key(topView) {
@@ -198,81 +228,44 @@ fun Scan3DViewer(
                 cameraNode = cameraNode,
                 cameraManipulator = manipulator,
             ) {
-                if (showPoints) {
-                    val groups = remember(snapshot, mode, bigDots) {
-                        ViewerGroups.build(snapshot, mode, if (bigDots) BIG_DOTS_MAX else DOTS_MAX)
-                    }
-                    for (g in groups) key(g.rgb, bigDots) {
-                        val geo = remember(snapshot, g, bigDots) {
-                            if (bigDots) tetraGeometry(engine, snapshot, g.indices) else pointsGeometry(engine, snapshot, g.indices)
-                        }
-                        val mat = remember(g.rgb) { materialLoader.createUnlitColorInstance(rgbToFloat4(g.rgb)) }
-                        MeshNode(
-                            primitiveType = geo.primitiveType,
-                            vertexBuffer = geo.vertexBuffer,
-                            indexBuffer = geo.indexBuffer,
-                            boundingBox = geo.boundingBox,
-                            materialInstance = mat,
-                        )
-                    }
-                }
-                if (showSurfaces) {
-                    val photo = textured?.takeIf { it.atlas != null && it.uvs != null || it.vertexRgb != null }
-                    if (photo != null) {
-                        key("textured", photo) {
-                            if (photo.atlas != null && photo.uvs != null) {
-                                TexturedMeshNode(engine, materialLoader, photo.mesh, photo.uvs, photo.atlas)
-                            } else if (photo.vertexRgb != null) {
-                                VertexColouredMeshNode(engine, materialLoader, photo.mesh, photo.vertexRgb)
-                            }
-                        }
-                    } else snapshot.mesh?.let { mesh ->
-                        key("mesh") {
-                            val geo = remember(snapshot) { meshGeometry(engine, mesh, ViewerHooks.meshUv?.invoke(snapshot)?.takeIf { it.size == mesh.vertexCount * 2 }) }
-                            // colour by kind: an object is "other" (grey)
-                            val mat = remember(materialLoader, snapshot) {
-                                ViewerHooks.meshMaterial?.invoke(materialLoader, snapshot)
-                                    ?: materialLoader.createColorInstance(0xFF000000.toInt() or KindColors.rgb(PlaneKind.OTHER), 0f, 0.6f, 0.5f)
-                            }
-                            MeshNode(
-                                primitiveType = geo.primitiveType,
-                                vertexBuffer = geo.vertexBuffer,
-                                indexBuffer = geo.indexBuffer,
-                                boundingBox = geo.boundingBox,
-                                materialInstance = mat,
-                            )
-                        }
-                    }
-                    for ((pi, p) in snapshot.planes.withIndex()) {
-                        if (p.vertexCount < 3) continue
-                        key(pi) {
-                            val geo = remember(snapshot, pi) { planeGeometry(engine, p) }
-                            val mat = remember(p.kind) { materialLoader.createUnlitColorInstance(rgbToFloat4(KindColors.rgb(p.kind), 0.32f)) }
-                            MeshNode(
-                                primitiveType = geo.primitiveType,
-                                vertexBuffer = geo.vertexBuffer,
-                                indexBuffer = geo.indexBuffer,
-                                boundingBox = geo.boundingBox,
-                                materialInstance = mat,
-                            )
-                        }
-                    }
+                scene?.parts?.forEach { part ->
+                    key(part.key) { PartNode(engine, materialLoader, part, textured?.atlas, meshMaterial, fail) }
                 }
             }
         }
 
-        if (!compact) Row(
+        if (scene != null && scene.isEmpty && (showPoints || showSurfaces)) {
+            Box(Modifier.align(Alignment.Center).padding(24.dp)) {
+                Pill {
+                    Text(
+                        ViewerScene.EMPTY_TEXT, color = Color.White, fontSize = 15.sp, textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    )
+                }
+            }
+        }
+
+        if (!compact) Column(
             Modifier.fillMaxWidth().statusBarsPadding().padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Pill { TextButton(onClick = onBack) { Text("Back", color = Color.White) } }
-            Pill {
-                Text(
-                    "${snapshot.pointCount} points" + (snapshot.room?.let { "  |  %.1f m2".format(java.util.Locale.US, it.areaM2) } ?: "") +
-                        (snapshot.mesh?.let { "  |  ${it.triangleCount} triangles" } ?: ""),
-                    color = Color.White, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Pill { TextButton(onClick = onBack) { Text("Back", color = Color.White) } }
+                Pill {
+                    Text(
+                        "${snapshot.pointCount} points" + (snapshot.room?.let { "  |  %.1f m2".format(java.util.Locale.US, it.areaM2) } ?: "") +
+                            (snapshot.mesh?.let { "  |  ${it.triangleCount} triangles" } ?: ""),
+                        color = Color.White, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                }
+            }
+            (scene?.note ?: ViewerScene.missingNote(snapshot))?.let { note ->
+                Pill {
+                    Text(note, color = Color(0xFFFFD60A), fontSize = 13.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
+                }
             }
         }
 

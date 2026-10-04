@@ -79,6 +79,20 @@ private object DebugDevEntry : DevEntry {
         }
     }
 
+    override fun recordError(context: Context, where: String, error: Throwable) {
+        try {
+            CrashStore(File(context.applicationContext.filesDir, "crash"))
+                .write("handled in $where (${Thread.currentThread().name})", error, System.currentTimeMillis(), BuildConfig.GIT_COMMIT)
+        } catch (e: Exception) {
+            Log.w(TAG, "could not record the error: ${e.message}")
+        }
+    }
+
+    override suspend fun sendReport(context: Context, pairing: PairingInfo?, text: String): String? {
+        if (pairing == null) return null
+        return DevLinkClient(context.applicationContext, pairing).sendText("crash", text) // the PC accepts logs|crash|diagnostics; a handled error is filed as a crash report
+    }
+
     @Composable
     override fun SettingsSection(pairing: PairingInfo?) {
         val ctx = LocalContext.current.applicationContext
@@ -212,6 +226,12 @@ class DevLinkClient(private val app: Context, private val pairing: PairingInfo) 
         }
         val diagId = upload("diagnostics", diag.toByteArray(Charsets.UTF_8))
         "Sent. logs id $logsId, diagnostics id $diagId"
+    }
+
+    /** One text upload of [kind] with the app/device header in front. Returns the line to show. */
+    suspend fun sendText(kind: String, text: String): String = withContext(Dispatchers.IO) {
+        val id = upload(kind, (header() + "\n" + text).toByteArray(Charsets.UTF_8).let { trimTail(it) })
+        "Report sent to the PC (id $id)"
     }
 
     suspend fun sendCrashIfAny(store: CrashStore): String? {

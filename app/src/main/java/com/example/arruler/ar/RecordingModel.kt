@@ -91,3 +91,23 @@ object TrackEvents {
 
     private fun num(v: Float): String = if (v.isNaN() || v.isInfinite()) "null" else v.toString()
 }
+
+/** What [RecordingPauseGate] needs from the recorder ([SessionRecorder]; a fake in tests). */
+interface Recordable {
+    val isRecording: Boolean
+    fun stop()
+}
+
+/**
+ * Stops a running recording cleanly BEFORE the AR view is held paused (3D viewer, object detail, diagnostics, QR scanner).
+ * ARCore would otherwise auto-stop it inside Session.pause() (setAutoStopOnPause) on a session that is going away, a path
+ * nobody had exercised. Recording is never restarted on resume: the user starts a new one from the RECORD pill.
+ */
+class RecordingPauseGate(private val recorder: Recordable) {
+    /** Call with the gate's state before it is applied; true when a recording was just stopped (announce it). */
+    fun onGate(paused: Boolean): Boolean {
+        if (!paused || !recorder.isRecording) return false
+        recorder.stop()
+        return true
+    }
+}

@@ -2,6 +2,10 @@ package com.example.arruler.ar
 
 import android.util.Log
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -29,12 +33,24 @@ fun ArSceneHost(
     renderer: ArRenderer,
     modifier: Modifier = Modifier,
     paused: Boolean = false,
+    /** Called when a running recording was stopped because the view is about to be held paused. */
+    onRecordingStopped: () -> Unit = {},
 ) {
+    // Before the gate below pauses ARCore: stop a running recording while the session still runs. This must be a
+    // DisposableEffect placed BEFORE rememberGatedLifecycle, whose own DisposableEffect re-syncs (and so pauses) the
+    // lifecycle; remember observers run in composition order, ahead of every SideEffect.
+    val recordingGate = remember(controller) { RecordingPauseGate(controller.recorder) }
+    val stopped by rememberUpdatedState(onRecordingStopped)
+    DisposableEffect(paused) {
+        if (recordingGate.onGate(paused)) stopped()
+        onDispose {}
+    }
     // While [paused] the view's lifecycle is held at CREATED: ARCore pauses and Filament stops drawing
     // (so a second GL surface can sit on top) but the view stays composed and the anchors survive.
     val lifecycle = rememberGatedLifecycle(paused)
     val live = controller.request.uri == null
     val cameraConfig = remember(live) { if (live) { s: Session -> chooseCameraConfig(s) } else null }
+    val glContext = remember(controller.request) { ArGlContext() }
     key(controller.request) {
         ARSceneView(
             lifecycle = lifecycle,
@@ -55,6 +71,9 @@ fun ArSceneHost(
         ) {
             with(renderer) { Nodes() }
         }
+        // After the AR view composed (its context is then current): record it once, and put it back whenever another
+        // SceneView left its own context current on the main thread (ARCore updates the camera texture there).
+        SideEffect { if (!paused) glContext.check() }
     }
 }
 

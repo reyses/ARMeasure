@@ -47,3 +47,22 @@ fun ConfirmDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
+
+/**
+ * The error card of an action caught at its boundary (Analyze, View 3D): 'Something went wrong: <reason>' with
+ * 'Send report' (the debug dev link when paired, else the share sheet) and 'Close'.
+ */
+@Composable
+fun ErrorCard(
+    reason: String,
+    onSendReport: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Something went wrong") },
+        text = { Text("Something went wrong: $reason\n\nThe app kept running. Send the report so this can be fixed.") },
+        confirmButton = { TextButton(onClick = onSendReport) { Text("Send report") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}

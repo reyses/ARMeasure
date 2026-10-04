@@ -7,6 +7,7 @@ import com.google.ar.core.RecordingConfig
 import com.google.ar.core.RecordingStatus
 import com.google.ar.core.Session
 import com.google.ar.core.Track
+import io.github.sceneview.ar.arcore.ARSession
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,7 +24,7 @@ class SessionRecorder(
     private val context: Context,
     private val sessionProvider: () -> Session?,
     private val clock: () -> Long = System::currentTimeMillis,
-) {
+) : Recordable {
     private val _state = MutableStateFlow<RecordingState>(RecordingState.Idle)
     val state: StateFlow<RecordingState> = _state.asStateFlow()
 
@@ -54,10 +55,15 @@ class SessionRecorder(
         }
     }
 
-    fun stop() {
+    override val isRecording: Boolean get() = _state.value is RecordingState.Recording
+
+    override fun stop() {
         if (_state.value !is RecordingState.Recording) return
         try {
-            sessionProvider()?.stopRecording()
+            val session = sessionProvider()
+            // A paused session already finalised the file (setAutoStopOnPause); stopRecording is only for a running one.
+            if (session != null && (session as? ARSession)?.isResumed != false) session.stopRecording()
+            pending.clear()
             _state.value = RecordingTransitions.stopped(_state.value)
         } catch (e: Exception) {
             fail(e.message ?: e.javaClass.simpleName)
