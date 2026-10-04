@@ -10,12 +10,18 @@ from pathlib import Path
 import qrcode
 
 
-def payload(url: str, token: str, name: str) -> str:
-    return json.dumps({"v": 1, "url": url, "token": token, "name": name}, separators=(",", ":"))
+def payload(url: str, token: str, name: str, urls: list[str] | None = None) -> str:
+    """"urls" (ordered candidates) is added when given; "url" stays for old phones (= first entry)."""
+    d: dict = {"v": 1, "url": urls[0] if urls else url}
+    if urls:
+        d["urls"] = urls
+    d.update(token=token, name=name)
+    return json.dumps(d, separators=(",", ":"))
 
 
-def show(url: str, token: str, name: str, data_dir: Path, open_png: bool = True) -> Path:
-    text = payload(url, token, name)
+def show(url: str, token: str, name: str, data_dir: Path, open_png: bool = True,
+         urls: list[str] | None = None) -> Path:
+    text = payload(url, token, name, urls)
     print("\nPairing payload (scan the QR in the ARMeasure app):\n" + text + "\n")
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, border=2)
     qr.add_data(text)

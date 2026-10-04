@@ -6,18 +6,63 @@ Python 3.12.10, venv `C:\venvs\armeasure-pc`, all dependencies pinned in `requir
 ## Start
 
 ```powershell
-C:\venvs\armeasure-pc\Scripts\python.exe -m armeasure_pc            # LAN mode, http://<LAN IPv4>:48310
+C:\venvs\armeasure-pc\Scripts\python.exe -m armeasure_pc            # Tailscale + LAN URLs (--bind auto)
 C:\venvs\armeasure-pc\Scripts\python.exe -m armeasure_pc --tunnel   # Cloudflare quick tunnel, https URL in the QR
 ```
 
 Run it from `D:\ARMeasure\pc-server`. On start it prints the pairing JSON `{"v":1,"url","token","name"}`, an ASCII QR in
 the console and opens `data\pairing.png` in the default image viewer (`--no-open` to skip). Scan it in the app.
 
-Flags: `--tunnel`, `--new-token` (rotate), `--no-open`, `--host`, `--port` (default 0.0.0.0:48310), `--data-dir`.
+Flags: `--tunnel`, `--new-token` (rotate), `--no-open`, `--bind` (default `auto`, see below; `--host` is an alias),
+`--port` (48310), `--apk-dir` (default `D:\APK`), `--data-dir`.
 `--tunnel` needs `%LOCALAPPDATA%\Programs\cloudflared\cloudflared.exe`. The LAN IP is the physical adapter that carries
 the default route (virtual adapters such as Hyper-V, WSL, VMware, VPN are skipped).
 
 Tests: `C:\venvs\armeasure-pc\Scripts\python.exe -m pytest` (about 10 s).
+
+## Tailscale-first pairing and binding
+
+The pairing JSON is `{"v":1,"url":<first>,"urls":[...],"token","name"}`. `urls` is ordered `[tailnet, lan, tunnel]`: when
+`C:\Program Files\Tailscale\tailscale.exe` exists and is logged in (`tailscale ip -4` gives a 100.64.0.0/10 address),
+the MagicDNS short name (`tailscale status --json`, `Self.DNSName`) comes first, then the 100.x address, then the LAN URL,
+then the quick-tunnel URL when `--tunnel`. Tailscale missing, stopped or logged out is not an error: the list is LAN
+(+ tunnel). `url` equals `urls[0]` for old phones.
+
+`--bind auto` (default) opens one socket each on 127.0.0.1, the Tailscale IP and the LAN IP (no 0.0.0.0), and the app also
+rejects (403) any request whose server-side address is not one of those. `--bind 0.0.0.0` (or any single address) restores
+the old behaviour with no filter. 127.0.0.1 stays bound because cloudflared connects there.
+
+## Dev link (docs/DEV_LINK.md)
+
+Same bearer auth as everything else.
+
+- `GET /v1/dev/apk?package=<applicationId>`: newest settled APK (not `.part`, not empty, mtime older than 2 s) in `--apk-dir`;
+  `com.example.arruler` -> `ARMeasure-*.apk`, `com.reyses.leaveontime` -> `LeaveOnTime-*.apk`. Returns versionCode,
+  versionName (aapt2 if found in PATH or the Android SDK, else 1 and ""), commit (last hyphen token if 7-40 hex), size,
+  sha256 (cached by path+mtime+size), url.
+- `GET /v1/dev/apk/<file>`: streams the APK (`application/vnd.android.package-archive`, Content-Length, Range). Only a plain
+  name present in a package listing is served; everything else 404.
+- `POST /v1/dev/logs`: multipart `device`, `app`, `commit`, `kind` (`logs|crash|diagnostics`, else 400) and `file`; cap
+  20 MB (413). Stored as `data\devlogs\<YYYY-MM-DD>\<id>-<kind>-<device>.txt`, newest 500 kept; answer
+  `{"id":"L-20261003-101500-9f3a"}`. (DEV_LINK.md names `D:\ARMeasure-logs\...` with meta.json and an 8 MB cap; this server
+  follows the PC-guard brief instead.)
+
+## Access log, auth failures, lockout
+
+- `data\access.log`: JSON lines `{ts, ip, method, path, status[, peer]}` for every request (5 MB x 6 rotating files). `ip` is
+  the TCP peer, except when the peer is 127.0.0.1/::1 (cloudflared): then `CF-Connecting-IP`, else the first
+  `X-Forwarded-For`, and `peer` is added. Those headers from any other peer are ignored.
+- `data\auth_failures.jsonl`: every 401 with `reason` (`missing|invalid`) and `locked`. The token is never logged.
+- Lockout: 10 failed auths from one IP within 10 min -> 429 (Retry-After) for that IP for 15 min, even with the right
+  token. State is in memory (a restart clears it). The token comparison stays constant time.
+
+## Firewall and Tailscale
+
+Windows Firewall inbound default is block. Tailscale traffic arrives on the Tailscale adapter, whose profile is often
+Public, so a rule limited to `-Profile Private` does not cover it. Checked without admin on 2026-10-03: all three profiles
+enabled with DefaultInboundAction NotConfigured (block); an enabled inbound Allow rule for
+`C:\users\reyse\python312\python.exe` exists on the Public profile (the venv's base interpreter); the only network is
+`Ethernet` (Public). No rule was added. Tailscale is not installed on this PC yet, so its adapter's profile is unverified.
 
 ## Firewall (LAN mode)
 

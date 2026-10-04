@@ -32,3 +32,15 @@ def load_token(data_dir: Path, new: bool = False) -> str:
         tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
         os.replace(tmp, cfg_path)
     return cfg["token"]
+
+# ---- dev link (docs/DEV_LINK.md) ----
+DEFAULT_APK_DIR = Path(r"D:\APK")
+DEV_PACKAGES = {"com.example.arruler": "ARMeasure-*.apk", "com.reyses.leaveontime": "LeaveOnTime-*.apk"}
+MAX_DEV_LOG_BYTES = 20 * 1024 * 1024
+DEV_LOG_KEEP = 500
+TAILSCALE = Path(r"C:\Program Files\Tailscale\tailscale.exe")
+
+# ---- access control ----
+LOCKOUT_FAILURES = 10
+LOCKOUT_WINDOW_S = 600
+LOCKOUT_DURATION_S = 900

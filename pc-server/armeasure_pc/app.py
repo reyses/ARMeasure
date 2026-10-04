@@ -13,7 +13,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from . import __version__, config
+from . import __version__, config, devlink
+from .access import AccessGuard, AddressFilter, JsonlLog, Lockout
 from .auth import check_bearer, require_auth
 from .jobs import JobManager, normalize_type
 from .processing import drone as drone_job
@@ -42,13 +43,14 @@ class UploadGuard:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
-        if scope["type"] != "http" or scope["method"] != "POST" or scope["path"].rstrip("/") != "/v1/jobs":
+        path = scope["path"].rstrip("/") if scope["type"] == "http" else ""
+        if scope["type"] != "http" or scope["method"] != "POST" or path not in ("/v1/jobs", "/v1/dev/logs"):
             return await self.app(scope, receive, send)
         st = scope["app"].state
         headers = {k.decode().lower(): v.decode() for k, v in scope["headers"]}
         if not check_bearer(headers.get("authorization"), st.token):
             return await err(401, "invalid or missing token", {"WWW-Authenticate": "Bearer"})(scope, receive, send)
-        limit = st.max_upload
+        limit = st.max_upload if path == "/v1/jobs" else st.max_dev_log
         cl = headers.get("content-length")
         if cl and cl.isdigit() and int(cl) > limit:
             return await err(413, f"upload exceeds {limit} bytes")(scope, receive, send)
@@ -124,7 +126,8 @@ def validate_package(zpath: Path, job_type: str) -> str | None:
 
 
 def create_app(data_dir: Path | None = None, token: str | None = None, max_upload: int | None = None,
-               ttl_days: float = config.JOB_TTL_DAYS, start_worker: bool = True) -> FastAPI:
+               ttl_days: float = config.JOB_TTL_DAYS, start_worker: bool = True, apk_dir: Path | None = None,
+               allowed_hosts: set[str] | None = None, lockout: Lockout | None = None) -> FastAPI:
     data_dir = Path(data_dir or config.DEFAULT_DATA_DIR)
     jm = JobManager(data_dir, ttl_days)
 
@@ -139,7 +142,16 @@ def create_app(data_dir: Path | None = None, token: str | None = None, max_uploa
     app.state.token = token or config.load_token(data_dir)
     app.state.max_upload = max_upload or config.MAX_UPLOAD_BYTES
     app.state.jobs = jm
+    app.state.apk_dir = Path(apk_dir or config.DEFAULT_APK_DIR)
+    app.state.max_dev_log = config.MAX_DEV_LOG_BYTES
+    app.state.data_dir = data_dir
+    app.state.allowed_hosts = allowed_hosts            # None = serve every local address
+    app.state.lockout = lockout or Lockout()
+    app.state.access_log = JsonlLog(data_dir / "access.log")
+    app.state.auth_log = JsonlLog(data_dir / "auth_failures.jsonl")
     app.add_middleware(UploadGuard)
+    app.add_middleware(AddressFilter)
+    app.add_middleware(AccessGuard)                    # outermost: lockout, access log, auth-failure log
     auth = [Depends(require_auth)]
 
     @app.exception_handler(StarletteHTTPException)
@@ -216,6 +228,33 @@ def create_app(data_dir: Path | None = None, token: str | None = None, max_uploa
                                             "quality": body.get("quality")}, name)
         jm.enqueue(job_id)
         return {"id": job_id}
+
+    @app.get("/v1/dev/apk", dependencies=auth)
+    def dev_apk(package: str | None = None):
+        p = devlink.newest(app.state.apk_dir, package or "")
+        if p is None:
+            raise HTTPException(404, "no APK for that package")
+        return devlink.describe(p)
+
+    @app.get("/v1/dev/apk/{name}", dependencies=auth)
+    def dev_apk_file(name: str):
+        p = devlink.downloadable(app.state.apk_dir, name)
+        if p is None:
+            raise HTTPException(404, "no such APK")
+        return FileResponse(p, media_type="application/vnd.android.package-archive")
+
+    @app.post("/v1/dev/logs", dependencies=auth)
+    async def dev_logs(file: UploadFile | None = File(None), kind: str | None = Form(None),
+                       device: str = Form("unknown"), app_id: str | None = Form(None, alias="app"),
+                       commit: str = Form("unknown")):
+        if kind not in devlink.KINDS:
+            raise HTTPException(400, "kind must be logs, crash or diagnostics")
+        if file is None:
+            raise HTTPException(400, "multipart part 'file' is required")
+        content = await file.read(app.state.max_dev_log + 1)
+        if len(content) > app.state.max_dev_log:
+            raise HTTPException(413, "log upload too large")
+        return {"id": devlink.store_log(data_dir, kind, device, content)}
 
     def _job_or_404(job_id: str) -> dict:
         meta = jm.get(job_id)

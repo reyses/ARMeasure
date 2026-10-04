@@ -67,3 +67,68 @@ def gpu_info() -> tuple[str | None, bool]:
     except (OSError, subprocess.TimeoutExpired):
         name = None
     return name, name is not None
+
+
+def _run_ts(exe, *args) -> str | None:
+    try:
+        r = subprocess.run([str(exe), *args], capture_output=True, text=True, timeout=8,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def tailscale_info(exe=None) -> dict | None:
+    """{"ip": "100.x.y.z", "name": "rxmoi", "fqdn": "rxmoi.tailnet.ts.net"} or None when Tailscale is absent,
+    stopped or not logged in. "name"/"fqdn" may be None when MagicDNS has no name."""
+    import json
+    from . import config
+    exe = exe or config.TAILSCALE
+    if not exe or not exe.exists():
+        return None
+    out = _run_ts(exe, "ip", "-4")
+    ip = None
+    for line in (out or "").split():
+        try:
+            a = ipaddress.ip_address(line.strip())
+        except ValueError:
+            continue
+        if a.version == 4 and a in ipaddress.ip_network("100.64.0.0/10"):
+            ip = str(a)
+            break
+    if ip is None:
+        return None
+    name = fqdn = None
+    st = _run_ts(exe, "status", "--json")
+    try:
+        dns = ((json.loads(st or "{}").get("Self") or {}).get("DNSName") or "").rstrip(".")
+    except (ValueError, AttributeError):
+        dns = ""
+    if dns:
+        fqdn, name = dns, dns.split(".")[0]
+    return {"ip": ip, "name": name, "fqdn": fqdn}
+
+
+def pairing_urls(port: int, lan_ip: str | None, tunnel_url: str | None, ts: dict | None) -> list[str]:
+    """Ordered candidates [tailnet..., lan, tunnel]; the phone tries them in this order."""
+    urls: list[str] = []
+    if ts:
+        if ts.get("name"):
+            urls.append(f"http://{ts['name']}:{port}")
+        urls.append(f"http://{ts['ip']}:{port}")
+    if lan_ip:
+        urls.append(f"http://{lan_ip}:{port}")
+    if tunnel_url:
+        urls.append(tunnel_url)
+    return list(dict.fromkeys(urls))
+
+
+def bind_addresses(mode: str, lan_ip: str | None, ts: dict | None) -> list[str]:
+    """'auto' -> loopback + Tailscale IP + LAN IP (de-duplicated); anything else is used verbatim."""
+    if mode != "auto":
+        return [mode]
+    out = ["127.0.0.1"]
+    for ip in (ts["ip"] if ts else None, lan_ip):
+        if ip and ip not in out:
+            out.append(ip)
+    return out

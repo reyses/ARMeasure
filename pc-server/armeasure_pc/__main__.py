@@ -1,4 +1,4 @@
-"""python -m armeasure_pc [--tunnel] [--new-token] [--host H] [--port P] [--no-open]"""
+"""python -m armeasure_pc [--tunnel] [--new-token] [--bind auto|ADDR] [--port P] [--apk-dir D] [--no-open]"""
 from __future__ import annotations
 
 import argparse
@@ -10,7 +10,7 @@ import uvicorn
 
 from . import config
 from .app import create_app
-from .net import lan_ipv4
+from .net import bind_addresses, lan_ipv4, pairing_urls, tailscale_info
 from .pairing import show
 from .tunnel import Tunnel
 
@@ -57,7 +57,9 @@ def main(argv=None) -> int:
     if argv and argv[0] == "import-drone":
         return import_drone(argv[1:])
     ap = argparse.ArgumentParser(prog="armeasure_pc")
-    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--bind", "--host", dest="bind", default="auto",
+                    help="auto (default): 127.0.0.1 + Tailscale IP + LAN IP only; or one address, e.g. 0.0.0.0")
+    ap.add_argument("--apk-dir", type=Path, default=config.DEFAULT_APK_DIR, help="folder served by /v1/dev/apk")
     ap.add_argument("--port", type=int, default=config.PORT)
     ap.add_argument("--tunnel", action="store_true", help="start a Cloudflare quick tunnel and pair via its https URL")
     ap.add_argument("--new-token", action="store_true", help="rotate the token (old pairings stop working)")
@@ -73,18 +75,47 @@ def main(argv=None) -> int:
     if args.new_token:
         print("Token rotated.")
     tunnel = None
+    socks: list[socket.socket] = []
     try:
+        ts = tailscale_info()
+        try:
+            lan = lan_ipv4()
+        except RuntimeError:
+            lan = None
+        if ts is None:
+            print("Tailscale: not available (not installed, stopped or not logged in); LAN/tunnel URLs only.")
+        else:
+            print(f"Tailscale: {ts['ip']}" + (f" ({ts['fqdn']})" if ts["fqdn"] else ""))
+        tunnel_url = None
         if args.tunnel:
             tunnel = Tunnel(args.port)
             print("Starting Cloudflare quick tunnel ...")
-            url = tunnel.start()
+            tunnel_url = tunnel.start()
+        urls = pairing_urls(args.port, lan, tunnel_url, ts)
+        if not urls:
+            print("error: no usable address (no LAN, Tailscale or tunnel)", file=sys.stderr)
+            return 2
+        print("Server URLs (pairing order): " + ", ".join(urls))
+        show(urls[0], token, socket.gethostname(), args.data_dir, open_png=not args.no_open, urls=urls)
+        hosts = bind_addresses(args.bind, lan, ts)
+        allowed = None if args.bind != "auto" else set(hosts)
+        app = create_app(args.data_dir, token, apk_dir=args.apk_dir, allowed_hosts=allowed)
+        cfg = uvicorn.Config(app, host=hosts[0], port=args.port, log_level="info")
+        server = uvicorn.Server(cfg)
+        if len(hosts) > 1:
+            for h in hosts:
+                sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                socks.append(sk)
+                sk.bind((h, args.port))
+                sk.listen(100)
+                sk.set_inheritable(True)
+            print("Listening on " + ", ".join(f"{h}:{args.port}" for h in hosts))
+            server.run(sockets=socks)
         else:
-            url = f"http://{lan_ipv4()}:{args.port}"
-        print(f"Server URL: {url}")
-        show(url, token, socket.gethostname(), args.data_dir, open_png=not args.no_open)
-        app = create_app(args.data_dir, token)
-        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+            server.run()
     finally:
+        for sk in socks:
+            sk.close()
         if tunnel:
             tunnel.stop()
     return 0
