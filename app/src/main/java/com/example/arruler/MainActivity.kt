@@ -1656,7 +1656,7 @@ class MainActivity : AppCompatActivity() {
         val decision = hub.route(JobType.SCAN_ANALYZE, null, JobEstimate(pointCount = n), pref)
         if (decision.blocked || decision.backend == Backend.PHONE) {
             decision.warning?.let { toastLong(it) }
-            scan.analyze()
+            scan.analyze(ar.trackedPlanes())
             return
         }
         scan.pause()

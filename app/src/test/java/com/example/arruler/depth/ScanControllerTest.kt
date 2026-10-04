@@ -43,7 +43,8 @@ class ScanControllerTest {
         val noFloor = ScanLogic.missingPieces(planes.filter { it.kind != PlaneKind.FLOOR })
         assertTrue(noFloor[0].contains("floor"))
         val twoWalls = planes.filter { it.kind != PlaneKind.WALL } + planes.filter { it.kind == PlaneKind.WALL }.take(2)
-        assertTrue(ScanLogic.missingPieces(twoWalls).single().contains("walls"))
+        val sides = ScanLogic.missingPieces(twoWalls)
+        assertTrue(sides.toString(), sides.isNotEmpty() && sides.all { it.startsWith("the wall ") && it.endsWith("where you started") })
         assertEquals(3, ScanLogic.missingPieces(emptyList()).size)
     }
 

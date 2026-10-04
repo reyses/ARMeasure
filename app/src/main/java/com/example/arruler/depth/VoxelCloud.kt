@@ -4,8 +4,23 @@ import com.example.arruler.geometry.Vec3
 import kotlin.math.floor
 
 /**
+ * Point cloud for plane extraction with per-point observation data, all arrays aligned:
+ * [xyz] packed meters, [hits] observations per point (null = 1 each), [range] mean depth in meters of the
+ * frames that observed the point (null, or NaN per point, = unknown).
+ */
+class CloudObservations(val xyz: FloatArray, val hits: IntArray? = null, val range: FloatArray? = null) {
+    val size: Int get() = xyz.size / 3
+
+    init {
+        require(hits == null || hits.size == size) { "hits must match points" }
+        require(range == null || range.size == size) { "range must match points" }
+    }
+}
+
+/**
  * Sparse voxel grid accumulating world-space points. Each occupied voxel keeps the running mean of
- * the points that fell in it and a hit count.
+ * the points that fell in it, a hit count, and the running mean of the observation range (camera depth
+ * of the frames that produced those points) when the caller supplies one; see [observations].
  *
  * Key packing: each axis index (floor(coord / voxelSize)) is biased by 512 and stored in 10 bits,
  * so the grid covers 512 voxels either side of the world origin (10.24 m at 2 cm; the AR session
@@ -25,6 +40,8 @@ class VoxelCloud(val voxelSize: Float = 0.02f, val maxVoxels: Int = 400_000) {
     private var keys = IntArray(1024)
     private var xyz = FloatArray(1024 * 3)
     private var hits = IntArray(1024)
+    private var rangeSum = FloatArray(1024)
+    private var rangeHits = IntArray(1024)
     private var used = 0
     private var cursor = 0
 
@@ -36,8 +53,11 @@ class VoxelCloud(val voxelSize: Float = 0.02f, val maxVoxels: Int = 400_000) {
     /** Number of occupied voxels. */
     val count: Int get() = used
 
-    /** Adds one world point; returns false if it was outside the grid range. */
-    fun add(x: Float, y: Float, z: Float): Boolean {
+    /**
+     * Adds one world point; returns false if it was outside the grid range. [range] is the depth (meters)
+     * at which the point was observed, NaN when unknown (it then does not enter the voxel's mean range).
+     */
+    fun add(x: Float, y: Float, z: Float, range: Float = Float.NaN): Boolean {
         val inv = 1f / voxelSize
         val ix = floor(x * inv).toInt() + BIAS
         val iy = floor(y * inv).toInt() + BIAS
@@ -55,6 +75,7 @@ class VoxelCloud(val voxelSize: Float = 0.02f, val maxVoxels: Int = 400_000) {
             xyz[o] += (x - xyz[o]) / h
             xyz[o + 1] += (y - xyz[o + 1]) / h
             xyz[o + 2] += (z - xyz[o + 2]) / h
+            if (!range.isNaN()) { rangeSum[slot] += range; rangeHits[slot]++ }
             return true
         }
         val target: Int
@@ -68,14 +89,42 @@ class VoxelCloud(val voxelSize: Float = 0.02f, val maxVoxels: Int = 400_000) {
         }
         keys[target] = key
         hits[target] = 1
+        if (range.isNaN()) { rangeSum[target] = 0f; rangeHits[target] = 0 } else { rangeSum[target] = range; rangeHits[target] = 1 }
         xyz[target * 3] = x; xyz[target * 3 + 1] = y; xyz[target * 3 + 2] = z
         index[key] = target
         return true
     }
 
-    /** Adds [n] points from a packed xyz array. */
-    fun addAll(points: FloatArray, n: Int = points.size / 3) {
-        for (i in 0 until n) add(points[i * 3], points[i * 3 + 1], points[i * 3 + 2])
+    /** Adds [n] points from a packed xyz array; [ranges] (one per point) are their observation depths, if known. */
+    fun addAll(points: FloatArray, n: Int = points.size / 3, ranges: FloatArray? = null) {
+        if (ranges == null) for (i in 0 until n) add(points[i * 3], points[i * 3 + 1], points[i * 3 + 2])
+        else for (i in 0 until n) add(points[i * 3], points[i * 3 + 1], points[i * 3 + 2], ranges[i])
+    }
+
+    /**
+     * Voxels with at least [minHits] hits as aligned arrays: mean positions, hit counts and mean observation
+     * range (NaN where no range was ever supplied), in the same order as [points].
+     */
+    fun observations(minHits: Int = 1): CloudObservations {
+        var n = 0
+        for (i in 0 until used) if (hits[i] >= minHits) n++
+        val out = FloatArray(n * 3)
+        val h = IntArray(n)
+        val r = FloatArray(n)
+        var k = 0
+        for (i in 0 until used) if (hits[i] >= minHits) {
+            out[k * 3] = xyz[i * 3]; out[k * 3 + 1] = xyz[i * 3 + 1]; out[k * 3 + 2] = xyz[i * 3 + 2]
+            h[k] = hits[i]
+            r[k] = if (rangeHits[i] > 0) rangeSum[i] / rangeHits[i] else Float.NaN
+            k++
+        }
+        return CloudObservations(out, h, r)
+    }
+
+    /** Mean observation range (meters) of the voxel containing the point; NaN if empty or never ranged. */
+    fun rangeAt(x: Float, y: Float, z: Float): Float {
+        val slot = slotOf(x, y, z) ?: return Float.NaN
+        return if (rangeHits[slot] > 0) rangeSum[slot] / rangeHits[slot] else Float.NaN
     }
 
     /** Mean positions (packed xyz) of voxels with at least [minHits] hits. */
@@ -92,13 +141,17 @@ class VoxelCloud(val voxelSize: Float = 0.02f, val maxVoxels: Int = 400_000) {
 
     /** Hit count of the voxel containing the point, or 0. */
     fun hitsAt(x: Float, y: Float, z: Float): Int {
+        val slot = slotOf(x, y, z) ?: return 0
+        return hits[slot]
+    }
+
+    private fun slotOf(x: Float, y: Float, z: Float): Int? {
         val inv = 1f / voxelSize
         val ix = floor(x * inv).toInt() + BIAS
         val iy = floor(y * inv).toInt() + BIAS
         val iz = floor(z * inv).toInt() + BIAS
-        if (ix !in 0 until SPAN || iy !in 0 until SPAN || iz !in 0 until SPAN) return 0
-        val slot = index[(ix shl 20) or (iy shl 10) or iz] ?: return 0
-        return hits[slot]
+        if (ix !in 0 until SPAN || iy !in 0 until SPAN || iz !in 0 until SPAN) return null
+        return index[(ix shl 20) or (iy shl 10) or iz]
     }
 
     /** Axis-aligned bounds (min, max) of the voxel mean positions, or null when empty. */
@@ -139,6 +192,7 @@ class VoxelCloud(val voxelSize: Float = 0.02f, val maxVoxels: Int = 400_000) {
     private fun grow() {
         val n = (keys.size * 2).coerceAtMost(maxVoxels)
         keys = keys.copyOf(n); hits = hits.copyOf(n); xyz = xyz.copyOf(n * 3)
+        rangeSum = rangeSum.copyOf(n); rangeHits = rangeHits.copyOf(n)
     }
 
     companion object {

@@ -30,7 +30,8 @@ sealed interface ScanAnalysis {
         val volumeM3: Float get() = areaM2 * heightM
     }
 
-    class Incomplete(val missing: List<String>) : ScanAnalysis
+    /** [partial] holds what was assembled (floor / ceiling heights, footprint, open sides) when anything was. */
+    class Incomplete(val missing: List<String>, val partial: RoomAssembly? = null) : ScanAnalysis
 }
 
 /** Pure decisions and conversions of the scan, kept free of ARCore so they are unit-testable. */
@@ -60,24 +61,39 @@ object ScanLogic {
         }
     }
 
-    /** What the sweep still lacks for [RoomFromPlanes.build] to succeed; empty when nothing obvious. */
-    fun missingPieces(planes: List<ExtractedPlane>): List<String> {
+    /**
+     * What the sweep still lacks for a complete room, in plain words (the UI prefixes "Missing: "); empty
+     * when nothing obvious. Names the floor, the ceiling, and each open side of the room by where it is from
+     * the scan's starting point.
+     */
+    fun missingPieces(planes: List<ExtractedPlane>): List<String> = missingPieces(RoomFromPlanes.assemble(planes))
+
+    fun missingPieces(a: RoomAssembly): List<String> {
         val out = ArrayList<String>()
-        if (planes.none { it.kind == PlaneKind.FLOOR }) out += "no floor (sweep the floor)"
-        if (planes.none { it.kind == PlaneKind.CEILING }) out += "no ceiling (sweep the ceiling)"
-        val walls = planes.count { it.kind == PlaneKind.WALL }
-        if (walls < 3) out += "fewer than 3 walls ($walls found; sweep the walls)"
+        if (a.floorY == null) out += "the floor (point the phone down and sweep it)"
+        if (a.ceilingY == null) out += "the ceiling (tilt the phone up and sweep it; the height is not measured without it)"
+        if (a.wallCount == 0) out += "the walls (sweep each wall from about 1.5 m away)"
+        else for (side in a.openSides) out += side.words
+        if (a.wallCount > 0 && a.openSides.isEmpty() && a.outline == null) out += "the corners (the walls do not meet yet; sweep the corners)"
         return out
     }
 
-    fun analyze(points: FloatArray): ScanAnalysis {
-        val planes = PlaneExtractor(gpu = com.example.arruler.gpu.GpuGate.ransacContext(), gpuPolicy = com.example.arruler.gpu.GpuGate.profile()).extract(points)
-        RoomFromPlanes.build(planes)?.let { return ScanAnalysis.Room(it) }
-        val missing = missingPieces(planes)
+    fun analyze(points: FloatArray): ScanAnalysis = analyze(CloudObservations(points))
+
+    /** Planes (with ARCore's [arPlanes] as anchors) -> room, or what is missing with the partial assembly. */
+    fun analyze(cloud: CloudObservations, arPlanes: List<ArPlaneObservation> = emptyList()): ScanAnalysis =
+        assess(extractor().extract(cloud, arPlanes))
+
+    fun assess(planes: List<ExtractedPlane>): ScanAnalysis {
+        val a = RoomFromPlanes.assemble(planes)
+        a.room?.let { return ScanAnalysis.Room(it) }
         return ScanAnalysis.Incomplete(
-            missing.ifEmpty { listOf("walls do not close into a room (sweep the corners)") }
+            missingPieces(a).ifEmpty { listOf("the corners (the walls do not close into a room; sweep the corners)") }, a,
         )
     }
+
+    /** The phone's extractor (GPU scoring when the gate allows it and the cloud has no ranges). */
+    fun extractor() = PlaneExtractor(gpu = com.example.arruler.gpu.GpuGate.ransacContext(), gpuPolicy = com.example.arruler.gpu.GpuGate.profile())
 }
 
 /** The room's floor outline lifted back to 3D at [RoomModel.floorY] (outline is x, z). */
@@ -97,6 +113,8 @@ class ScanController(private val scope: CoroutineScope) {
     @Volatile private var generation = 0
     @Volatile private var previewInFlight = false
     @Volatile private var totalPoints = 0L
+    /** ARCore planes handed to the last [analyze], reused by [snapshot] so View 3D shows the same planes. */
+    @Volatile private var lastArPlanes: List<ArPlaneObservation> = emptyList()
     private var lastPreviewMs = 0L
 
     private val _scanning = MutableStateFlow(false)
@@ -124,6 +142,7 @@ class ScanController(private val scope: CoroutineScope) {
         _scanning.value = false
         generation++
         _analysis.value = null
+        lastArPlanes = emptyList()
         _preview.value = emptyList()
         _stats.value = ScanStats()
         totalPoints = 0
@@ -138,7 +157,7 @@ class ScanController(private val scope: CoroutineScope) {
         sampler.onFrame(frame) { sample ->
             lock.withLock {
                 if (sampleGen == generation) {
-                    cloud.addAll(sample.xyz, sample.count)
+                    cloud.addAll(sample.xyz, sample.count, sample.range.takeIf { it.size == sample.count })
                     totalPoints += sample.count
                     _stats.value = ScanStats(cloud.count, totalPoints)
                 }
@@ -167,7 +186,7 @@ class ScanController(private val scope: CoroutineScope) {
         withContext(Dispatchers.Default) {
             lock.withLock {
                 if (cloud.count == 0) return@withLock null
-                val planes = PlaneExtractor(gpu = com.example.arruler.gpu.GpuGate.ransacContext(), gpuPolicy = com.example.arruler.gpu.GpuGate.profile()).extract(cloud.points(ScanLogic.ANALYZE_MIN_HITS))
+                val planes = ScanLogic.extractor().extract(cloud.observations(ScanLogic.ANALYZE_MIN_HITS), lastArPlanes)
                 ScanSnapshot.from(cloud, planes, RoomFromPlanes.build(planes), id, projectId)
             }
         }
@@ -193,18 +212,21 @@ class ScanController(private val scope: CoroutineScope) {
         }
 
     /**
-     * Runs plane extraction + room reconstruction off the main thread; result in [analysis]. A failure lands in [failure]
+     * Runs plane extraction + room reconstruction off the main thread; result in [analysis]. [arPlanes] is the
+     * TRACKING ARCore planes at this moment (ArSessionController.trackedPlanes()), used as floor / ceiling / wall
+     * anchors. A failure lands in [failure]
      * (the caller shows the error card) instead of escaping the coroutine and killing the app.
      */
-    fun analyze() {
+    fun analyze(arPlanes: List<ArPlaneObservation> = emptyList()) {
         if (_analyzing.value) return
         _analyzing.value = true
         _scanning.value = false
         val gen = generation
         scope.launch(Dispatchers.Default) {
             try {
-                val pts = lock.withLock { cloud.points(ScanLogic.ANALYZE_MIN_HITS) }
-                val result = ScanLogic.analyze(pts)
+                lastArPlanes = arPlanes
+                val obs = lock.withLock { cloud.observations(ScanLogic.ANALYZE_MIN_HITS) }
+                val result = ScanLogic.analyze(obs, arPlanes)
                 if (gen == generation) _analysis.value = result
             } catch (e: CancellationException) {
                 throw e

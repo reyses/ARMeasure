@@ -5,8 +5,11 @@ import com.google.ar.core.Frame
 import com.google.ar.core.exceptions.NotYetAvailableException
 import java.nio.ByteOrder
 
-/** World-space points from one frame: packed xyz (meters) and a parallel confidence in 0..1. */
-class DepthSample(val xyz: FloatArray, val confidence: FloatArray) {
+/**
+ * World-space points from one frame: packed xyz (meters), a parallel confidence in 0..1 and [range], the
+ * depth (meters along the optical axis) each point was observed at (empty when unknown).
+ */
+class DepthSample(val xyz: FloatArray, val confidence: FloatArray, val range: FloatArray = FloatArray(0)) {
     val count: Int get() = confidence.size
 }
 
@@ -94,6 +97,7 @@ class DepthFrameSampler(
         val maxPts = ((w + step - 1) / step) * ((h + step - 1) / step)
         val xyz = FloatArray(maxPts * 3)
         val cf = FloatArray(maxPts)
+        val rg = FloatArray(maxPts)
         val tmp = FloatArray(3)
         val minMm = (minDepthM * 1000f).toInt(); val maxMm = (maxDepthM * 1000f).toInt()
         val minC = (minConfidence * 255f).toInt()
@@ -109,6 +113,7 @@ class DepthFrameSampler(
                         DepthMath.unproject(u.toFloat(), v.toFloat(), mm, raw.intrinsics, tmp)
                         DepthMath.transformPoint(raw.pose, tmp[0], tmp[1], tmp[2], xyz, n * 3)
                         cf[n] = c / 255f
+                        rg[n] = mm * 0.001f
                         n++
                     }
                 }
@@ -116,6 +121,6 @@ class DepthFrameSampler(
             }
             v += step
         }
-        return DepthSample(xyz.copyOf(n * 3), cf.copyOf(n))
+        return DepthSample(xyz.copyOf(n * 3), cf.copyOf(n), rg.copyOf(n))
     }
 }

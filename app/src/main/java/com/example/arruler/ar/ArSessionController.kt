@@ -8,7 +8,10 @@ import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.example.arruler.depth.ArPlaneObservation
+import com.example.arruler.depth.ArPlaneType
 import com.example.arruler.depth.DepthFrameSampler
+import com.example.arruler.geometry.Vec3
 import com.example.arruler.measure.MeasurePoint
 import com.example.arruler.objscan.PlaneCandidate
 import com.example.arruler.objscan.PlaneRaycast
@@ -368,6 +371,39 @@ class ArSessionController(
         val buf = plane.polygon
         val out = FloatArray(buf.remaining())
         buf.get(out)
+        return out
+    }
+
+    // ---- ARCore planes for the room scan ----
+
+    /**
+     * Main thread: every TRACKING, non-subsumed ARCore plane as a pure [ArPlaneObservation] (world space),
+     * for [com.example.arruler.depth.ScanController.analyze] to anchor the depth planes with. Empty before a
+     * session exists or when it has been closed.
+     */
+    fun trackedPlanes(): List<ArPlaneObservation> {
+        val session = currentSession() ?: return emptyList()
+        val out = ArrayList<ArPlaneObservation>()
+        try {
+            for (plane in session.getAllTrackables(Plane::class.java)) {
+                if (plane.trackingState != TrackingState.TRACKING || plane.subsumedBy != null) continue
+                val center = plane.centerPose
+                val xz = polygonXz(plane)
+                val poly = List(xz.size / 2) { i ->
+                    val w = center.transformPoint(floatArrayOf(xz[2 * i], 0f, xz[2 * i + 1]))
+                    Vec3(w[0], w[1], w[2])
+                }
+                val n = center.getTransformedAxis(1, 1f)
+                val type = when (plane.type) {
+                    Plane.Type.HORIZONTAL_UPWARD_FACING -> ArPlaneType.HORIZONTAL_UP
+                    Plane.Type.HORIZONTAL_DOWNWARD_FACING -> ArPlaneType.HORIZONTAL_DOWN
+                    Plane.Type.VERTICAL -> ArPlaneType.VERTICAL
+                }
+                out += ArPlaneObservation(type, Vec3(center.tx(), center.ty(), center.tz()), Vec3(n[0], n[1], n[2]), poly, plane.extentX, plane.extentZ)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "trackedPlanes failed", e)
+        }
         return out
     }
 
